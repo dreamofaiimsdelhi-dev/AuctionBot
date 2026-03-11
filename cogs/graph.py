@@ -26,11 +26,17 @@ from pymongo import MongoClient
 import config
 from config import REPLY
 from utils import build_query, resolve_pokemon_name, shiny_prefix
+from filters import FLAG_DEFINITIONS
 
 # ─── DB ───────────────────────────────────────────────────────────────────────
 _mongo = MongoClient(config.MONGO_URI)
 _db    = _mongo[config.MONGO_DB_NAME]
 _col   = _db[config.MONGO_COLLECTION]
+
+# ─── Name flag aliases (derived from filters.py — stays in sync automatically) ─
+_NAME_FLAGS: frozenset[str] = frozenset(
+    ["--name"] + FLAG_DEFINITIONS["--name"].get("aliases", [])
+)
 
 # ─── Theme colours ────────────────────────────────────────────────────────────
 BG_DARK       = "#1e1f22"
@@ -434,8 +440,7 @@ class Graph(commands.Cog):
           j!g --name mewtwo --iv >90 --sort price
           j!g --name goomy --limit 10
         """
-        _name_flags = {"--name", "--n", "-n", "--pokemon", "--poke"}
-        if not any(t in _name_flags for t in (filters.split() if filters else [])):
+        if not any(t in _NAME_FLAGS for t in (filters.split() if filters else [])):
             await ctx.send(
                 view=_error_view(
                     f"❌ Please specify a Pokémon name.\n"
