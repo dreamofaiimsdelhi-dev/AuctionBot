@@ -434,7 +434,8 @@ class Graph(commands.Cog):
           j!g --name mewtwo --iv >90 --sort price
           j!g --name goomy --limit 10
         """
-        if "--name" not in filters and "--n" not in filters:
+        _name_flags = {"--name", "--n", "-n", "--pokemon", "--poke"}
+        if not any(t in _name_flags for t in (filters.split() if filters else [])):
             await ctx.send(
                 view=_error_view(
                     f"❌ Please specify a Pokémon name.\n"
@@ -447,7 +448,7 @@ class Graph(commands.Cog):
             return
 
         raw              = filters.split() if filters else []
-        query, _, limit  = build_query(raw)
+        query, _, limit  = build_query(raw, expand_name_by_dex=True)
         display_str      = filters.strip()
 
         # Only pull fields we actually need (short names)
