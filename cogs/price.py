@@ -116,9 +116,17 @@ def _analyse(query: dict, filters_str: str) -> discord.ui.LayoutView:
         base_query["gx"] = query["gx"]
 
     # Resolve a display name
-    pn_val   = query.get("pn", {})
-    raw_name = pn_val.get("$regex", "").strip("^$") if isinstance(pn_val, dict) else str(pn_val)
-    name     = resolve_pokemon_name(raw_name) or raw_name or "Unknown"
+    pn_val = query.get("pn", {})
+    if isinstance(pn_val, dict) and "$in" in pn_val:
+        # expand_name_by_dex path: pn = {"$in": ["Sentret", "Furret", ...]}
+        # Pick the shortest name — base forms are typically shorter than form names
+        candidates = pn_val["$in"]
+        name = min(candidates, key=len) if candidates else "Unknown"
+    elif isinstance(pn_val, dict) and "$regex" in pn_val:
+        raw_name = pn_val["$regex"].strip("^$")
+        name = resolve_pokemon_name(raw_name) or raw_name or "Unknown"
+    else:
+        name = str(pn_val) or "Unknown"
 
     is_shiny = query.get("sh") is True
     is_gmax  = query.get("gx") is True
