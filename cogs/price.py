@@ -27,11 +27,17 @@ from pymongo import MongoClient
 import config
 from config import REPLY
 from utils import build_query, resolve_pokemon_name, shiny_prefix
+from filters import FLAG_DEFINITIONS
 
 # ─── DB ───────────────────────────────────────────────────────────────────────
 _mongo = MongoClient(config.MONGO_URI)
 _db    = _mongo[config.MONGO_DB_NAME]
 _col   = _db[config.MONGO_COLLECTION]
+
+# ─── Name flag aliases (derived from filters.py — stays in sync automatically) ─
+_NAME_FLAGS: frozenset[str] = frozenset(
+    ["--name"] + FLAG_DEFINITIONS["--name"].get("aliases", [])
+)
 
 # How many IV percent points either side to use for "comparable" sales
 IV_BAND = 5.0
@@ -342,7 +348,7 @@ class Price(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.hybrid_command(name="price", aliases=["pc", "pricecheck"])
+    @commands.hybrid_command(name="price", aliases=["p", "pricecheck"])
     @app_commands.describe(filters="Same filters as auction search e.g: --name eevee --shiny --iv >85")
     async def price_cmd(self, ctx: commands.Context, *, filters: str = ""):
         """
@@ -354,8 +360,7 @@ class Price(commands.Cog):
           j!price --name charizard --gmax --iv >85
           j!price --name umbreon --move wish
         """
-        _name_flags = {"--name", "--n", "-n", "--pokemon", "--poke"}
-        if not any(t in _name_flags for t in (filters.split() if filters else [])):
+        if not any(t in _NAME_FLAGS for t in (filters.split() if filters else [])):
             await ctx.send(
                 view=_error_view(
                     f"❌ Please specify a Pokémon name.\n"
