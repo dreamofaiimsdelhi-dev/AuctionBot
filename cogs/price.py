@@ -346,7 +346,8 @@ class Price(commands.Cog):
           j!price --name charizard --gmax --iv >85
           j!price --name umbreon --move wish
         """
-        if "--name" not in filters and "--n" not in filters and "-n" not in filters:
+        _name_flags = {"--name", "--n", "-n", "--pokemon", "--poke"}
+        if not any(t in _name_flags for t in (filters.split() if filters else [])):
             await ctx.send(
                 view=_error_view(
                     f"❌ Please specify a Pokémon name.\n"
@@ -359,7 +360,7 @@ class Price(commands.Cog):
             return
 
         raw         = filters.split() if filters else []
-        query, _    = build_query(raw)
+        query, _, _ = build_query(raw, expand_name_by_dex=True)
 
         async with ctx.typing():
             view = _analyse(query, filters)
