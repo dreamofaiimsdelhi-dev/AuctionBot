@@ -734,7 +734,7 @@ def build_query(
             sv = val.lower().strip()
             sort_field_map = {
                 "iv":    "iv",
-                "price": "bid",
+                "bid": "bid",
                 "level": "lv",
                 "date":  "ts",
                 "id":    "aid",
