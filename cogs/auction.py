@@ -212,8 +212,8 @@ def create_info_view(record: dict) -> discord.ui.LayoutView:
     shiny_s    = shiny_prefix(record)
     img_url    = get_pokemon_image_url(name, shiny)
     accent     = config.SHINY_EMBED_COLOR if shiny else config.EMBED_COLOR
-    bidder_s   = f"<@{bidder_id}>" if bidder_id else "Unknown"
-    seller_s   = f"`{seller}`" if not seller_id else f"<@{seller_id}> (`{seller}`)"
+    bidder_s   = (f"<@{bidder_id}> (`{bidder_id}`)" if bidder_id else "Unknown")
+    seller_s   = (f"`{seller}`" if not seller_id else f"<@{seller_id}> (`{seller_id}`) (`{seller}`)")
 
     basic_text = (
         f"**📋 Basic Info**\n"
@@ -233,6 +233,9 @@ def create_info_view(record: dict) -> discord.ui.LayoutView:
         f"{REPLY} **Ended On:** `{date_s}`"
     )
 
+    def _iv_val(v) -> str:
+        return str(int(v)) if v is not None else "?"
+
     iv_text = (
         f"**📊 IVs** — `{iv_tot_s}` total\n"
         + iv_line("HP",  record.get("hp"))   + "\n"
@@ -241,6 +244,16 @@ def create_info_view(record: dict) -> discord.ui.LayoutView:
         + iv_line("SpA", record.get("spa"))  + "\n"
         + iv_line("SpD", record.get("spd"))  + "\n"
         + iv_line("Spe", record.get("spe"))
+    )
+
+    stats_line = (
+        f"`Hp-{_iv_val(record.get('hp'))}"
+        f"/Atk-{_iv_val(record.get('atk'))}"
+        f"/Def-{_iv_val(record.get('def'))}"
+        f"/SpA-{_iv_val(record.get('spa'))}"
+        f"/SpD-{_iv_val(record.get('spd'))}"
+        f"/Spe-{_iv_val(record.get('spe'))}"
+        f"/IV {iv_tot_s}`"
     )
 
     moves_text = (
@@ -266,6 +279,7 @@ def create_info_view(record: dict) -> discord.ui.LayoutView:
         discord.ui.TextDisplay(content=auction_text),
         discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(content=iv_text),
+        discord.ui.TextDisplay(content=stats_line),
         discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(content=moves_text),
     ]
