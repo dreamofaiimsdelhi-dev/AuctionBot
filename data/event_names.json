@@ -2865,5 +2865,95 @@
       ]
     },
     "is_variant": true
+  },
+  {
+    "dex_number": "69",
+    "name": "Beta Bellsprout",
+    "other_names": {
+      "en": [
+        "April Fool's Day Bellsprout"
+      ]
+    },
+    "is_variant": true
+  },
+  {
+    "dex_number": "153",
+    "name": "Beta Bayleef",
+    "other_names": {
+      "en": [
+        "April Fool's Day Bayleef"
+      ]
+    },
+    "is_variant": true
+  },
+  {
+    "dex_number": "189",
+    "name": "Dandelion Jumpluff",
+    "other_names": {
+      "en": [
+        "Spring Jumpluff"
+      ]
+    },
+    "is_variant": true
+  },
+  {
+    "dex_number": "738",
+    "name": "Cicada Vikavolt",
+    "other_names": {
+      "en": [
+        "Spring Vikavolt"
+      ]
+    },
+    "is_variant": true
+  },
+  {
+    "dex_number": "165",
+    "name": "Swarming Ledyba",
+    "other_names": {
+      "en": [
+        "Spring Ledyba"
+      ]
+    },
+    "is_variant": true
+  },
+  {
+    "dex_number": "1019",
+    "name": "Blossom Hydrapple",
+    "other_names": {
+      "en": [
+        "Spring Hydrapple"
+      ]
+    },
+    "is_variant": true
+  },
+  {
+    "dex_number": "406",
+    "name": "Blooming Budew",
+    "other_names": {
+      "en": [
+        "Spring Budew"
+      ]
+    },
+    "is_variant": true
+  },
+  {
+    "dex_number": "548",
+    "name": "Onion Petilil",
+    "other_names": {
+      "en": [
+        "Spring Petilil"
+      ]
+    },
+    "is_variant": true
+  },
+  {
+    "dex_number": "46",
+    "name": "Mycena Paras",
+    "other_names": {
+      "en": [
+        "Spring Paras"
+      ]
+    },
+    "is_variant": true
   }
 ]
