@@ -1707,3 +1707,7 @@ dex_number,name,region,type1,type2
 571,Foroark,Unova,Steel,Dark
 660,Bonnersby,Kalos,Steel,Ground
 760,Fazwear,Alola,Steel,Fighting
+69,Beta Bellsprout,Kanto,Grass,Poison
+153,Beta Bayleef,Johto,Grass,
+165,Swarming Ledyba,Johto,Bug,Flying
+738,Cicada Vikavolt,Alola,Bug,Electric
