@@ -1272,6 +1272,17 @@ class Stats(commands.Cog):
             view = _build_user_stats_view(target, data=data)
         await ctx.reply(view=view, mention_author=False)
 
+    @stats_cmd.error
+    async def stats_cmd_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.BadArgument):
+            await ctx.reply(
+                view=_error_view("❌ User not found. Please mention a valid user or provide a correct ID."),
+                mention_author=False,
+            )
+        else:
+            log.exception("Unexpected error in stats_cmd", exc_info=error)
+            await ctx.reply(view=_error_view("❌ Something went wrong."), mention_author=False)
+
     @commands.hybrid_command(name="lb", aliases=["leaderboard"])
     @app_commands.describe(
         lb_type="sellers | bidders | shiny_sellers | shiny_bidders | gmax_sellers | gmax_bidders | pokemon | expensive",
