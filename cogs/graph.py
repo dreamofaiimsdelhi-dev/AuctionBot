@@ -666,15 +666,17 @@ class Graph(commands.Cog):
             ),
             discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
             discord.ui.TextDisplay(content=_filters_text),
-            discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.small),
-            discord.ui.ActionRow(*_btn_list),
+            discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         ]
+
+        _action_row = discord.ui.ActionRow(*_btn_list)
 
         class GraphView(discord.ui.LayoutView):
             container = discord.ui.Container(
                 *_container_comps,
                 accent_colour=accent,
             )
+            action_row = _action_row
             def __init__(self):
                 super().__init__(timeout=300)
 
