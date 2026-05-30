@@ -1,6 +1,6 @@
 """
 cogs/graph.py – Price history graph for Pokémon auctions.
-Uses the same filter system as auction search.
+Uses the same filter system as auction search .
 Generates a dark-themed matplotlib chart and sends it as a Discord image.
 
 Field mapping (DB short name → meaning):
