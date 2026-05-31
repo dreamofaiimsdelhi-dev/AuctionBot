@@ -448,9 +448,37 @@ class Auction(commands.Cog):
         # ── Validate --name values before building the query ──────────────────
         # Walk tokens, collect every value that follows a --name flag, and check
         # it resolves to a known Pokémon.  Unknown names get an immediate error.
+        #
+        # Special handling for --ex / --exclude:
+        #   --ex takes TWO argument tokens: <kind> <value>
+        #   e.g. "--ex name meowth" — "name" and "meowth" are both arguments,
+        #   NOT flag names.  We must skip both so "name" isn't validated as a
+        #   Pokémon name.  The known kind keywords are:
+        #   name, evo, evolution, type, region, reg, category, cat, group
+        _EXCLUDE_FLAGS = frozenset(
+            ["--exclude"] + [a for a in
+                __import__("filters").FLAG_DEFINITIONS["--exclude"].get("aliases", [])]
+        )
+        _EX_KIND_TOKENS = frozenset({
+            "name", "evo", "evolution", "type", "region", "reg",
+            "category", "cat", "group",
+        })
+
         i = 0
         while i < len(raw):
             tok = raw[i]
+
+            # Skip --ex <kind> <value> entirely — both argument tokens are
+            # consumed here so neither gets mistaken for a Pokémon name below.
+            if tok.lower() in _EXCLUDE_FLAGS:
+                i += 1  # skip the flag itself
+                if i < len(raw) and raw[i].lower() in _EX_KIND_TOKENS:
+                    i += 1  # skip the kind token (e.g. "name", "type")
+                # Skip the value tokens until the next flag
+                while i < len(raw) and not raw[i].startswith("-"):
+                    i += 1
+                continue
+
             if tok.lower() in _NAME_FLAGS:
                 # Consume the value tokens (everything until the next flag)
                 i += 1
