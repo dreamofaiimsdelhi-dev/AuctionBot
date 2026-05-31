@@ -127,8 +127,6 @@ def _detect_variant(query: dict) -> str:
 def _format_price(val: float) -> str:
     if val >= 1_000_000:
         return f"{val/1_000_000:.2f}M"
-    if val >= 100_000:
-        return f"{val/1_000:.1f}k"
     if val >= 10_000:
         return f"{val/1_000:.1f}k"
     if val >= 1_000:
@@ -270,7 +268,7 @@ def build_compare_graph(
             q1, q3 = np.percentile(prices, 25), np.percentile(prices, 75)
             iqr    = q3 - q1
             upper  = q3 + 3.0 * iqr if iqr > 0 else prices.max()
-            lower  = max(0.0, q1 - 3.0 * iqr) if iqr > 0 else 0.0
+            lower  = (q1 - 3.0 * iqr) if iqr > 0 else 0.0  # no max(0,...) clamp — see build_graph
             mask   = ~((prices > upper) | ((prices < lower) & (lower > 0)))
             dates  = [d for d, m in zip(dates, mask) if m]
             prices = prices[mask]
@@ -308,20 +306,44 @@ def build_compare_graph(
             "trend":  f"{arrow} {_format_price(abs(slope))}/sale",
         })
 
-    # ── Axes formatting ───────────────────────────────────────────────────────
-    _locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
-    ax.xaxis.set_major_locator(_locator)
-    _formatter = mdates.ConciseDateFormatter(
-        _locator,
-        formats=["%Y", "%b", "%b", "%b %-d", "%H:%M", "%S.%f"],
-        offset_formats=["", "%Y", "%b %Y", "%b %Y", "%b %-d %Y", "%b %-d %Y %H:%M"],
-        show_offset=True,
-    )
-    _formatter.offset_string = ""   # we handle year via the formats themselves
-    ax.xaxis.set_major_formatter(_formatter)
-    ax.xaxis.get_offset_text().set_color(MUTED_COLOR)
-    ax.xaxis.get_offset_text().set_fontsize(8)
-    fig.autofmt_xdate(rotation=25, ha="right")
+    # ── X-axis: always show "Mon YYYY" so the timeline is unambiguous ─────────
+    if all_dates:
+        _span_days = (max(all_dates) - min(all_dates)).days if len(all_dates) > 1 else 1
+    else:
+        _span_days = 365
+    if _span_days <= 60:
+        _major_loc = mdates.WeekdayLocator(byweekday=mdates.MO)
+        _major_fmt = mdates.DateFormatter("%-d %b %Y")
+        _minor_loc = mdates.DayLocator()
+    elif _span_days <= 365:
+        _major_loc = mdates.MonthLocator()
+        _major_fmt = mdates.DateFormatter("%b %Y")
+        _minor_loc = mdates.WeekdayLocator(byweekday=mdates.MO)
+    elif _span_days <= 365 * 2:
+        _major_loc = mdates.MonthLocator(bymonth=[1, 3, 5, 7, 9, 11])
+        _major_fmt = mdates.DateFormatter("%b %Y")
+        _minor_loc = mdates.MonthLocator()
+    else:
+        _major_loc = mdates.MonthLocator(bymonth=[1, 4, 7, 10])
+        _major_fmt = mdates.DateFormatter("%b %Y")
+        _minor_loc = mdates.MonthLocator()
+
+    ax.xaxis.set_major_locator(_major_loc)
+    ax.xaxis.set_major_formatter(_major_fmt)
+    ax.xaxis.set_minor_locator(_minor_loc)
+    ax.tick_params(axis="x", which="minor", length=3, color=GRID_COLOR)
+    fig.autofmt_xdate(rotation=30, ha="right")
+
+    # Year boundary lines
+    if all_dates:
+        _y0, _y1 = min(all_dates).year, max(all_dates).year
+        for _yr in range(_y0, _y1 + 1):
+            _jan1 = datetime(_yr, 1, 1, tzinfo=timezone.utc)
+            if min(all_dates) <= _jan1 <= max(all_dates):
+                ax.axvline(_jan1, color=MUTED_COLOR, linewidth=0.8,
+                           linestyle=":", alpha=0.55, zorder=2)
+                ax.text(_jan1, ax.get_ylim()[1], f" {_yr}", color=MUTED_COLOR,
+                        fontsize=7, va="top", alpha=0.7)
     ax.tick_params(colors=TEXT_COLOR, labelsize=9)
     for spine in ax.spines.values():
         spine.set_edgecolor(GRID_COLOR)
@@ -450,7 +472,13 @@ def build_graph(
         iqr     = q3 - q1
         # Both high and low outliers compress the Y-axis / distort the avg.
         upper_fence = q3 + 3.0 * iqr if iqr > 0 else prices.max()
-        lower_fence = max(0.0, q1 - 3.0 * iqr) if iqr > 0 else 0.0
+        # Do NOT clamp with max(0, ...) — that makes lower_fence always 0 for
+        # typical price distributions (q1 < 3×IQR almost always), so the guard
+        # (lower_fence > 0) is never True and low outliers are silently skipped.
+        # Compute the raw fence; only apply it when it is meaningfully above 0,
+        # meaning normal prices are high enough that near-zero sales are genuinely
+        # sniped/underpriced.
+        lower_fence = (q1 - 3.0 * iqr) if iqr > 0 else 0.0
 
         high_outlier_mask = prices > upper_fence
         low_outlier_mask  = (prices < lower_fence) & (lower_fence > 0)
@@ -546,32 +574,58 @@ def build_graph(
 
     idx_max = int(np.argmax(prices_plot))
     idx_min = int(np.argmin(prices_plot))
-    for idx, label, color in [
-        (idx_max, f"Max\n{_format_price(prices_plot.max())}", pal.get("trend_up", "#06d6a0")),
-        (idx_min, f"Min\n{_format_price(prices_plot.min())}", pal.get("trend_down", "#ef476f")),
+    # If max/min land near the same x position, flip one annotation to the other side
+    _same_x = abs(idx_max - idx_min) < max(1, len(prices_plot) // 20)
+    for idx, label, color, _default_yoff in [
+        (idx_max, f"Max\n{_format_price(prices_plot.max())}", pal.get("trend_up", "#06d6a0"),  16),
+        (idx_min, f"Min\n{_format_price(prices_plot.min())}", pal.get("trend_down", "#ef476f"), -28),
     ]:
+        _yoff = _default_yoff
+        if _same_x and idx == idx_min:
+            _yoff = -44  # push min annotation further down to avoid overlap
         ax.annotate(
             label,
             xy=(dates_plot[idx], prices_plot[idx]),
-            xytext=(20 if idx == idx_max else 20, 16 if idx == idx_max else -28),
+            xytext=(20, _yoff),
             textcoords="offset points",
             ha="center", va="bottom",
             color=color, fontsize=8, fontweight="bold",
             arrowprops=dict(arrowstyle="-", color=color, lw=1),
         )
 
-    _locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
-    ax.xaxis.set_major_locator(_locator)
-    _formatter = mdates.ConciseDateFormatter(
-        _locator,
-        formats=["%Y", "%b", "%b", "%b %-d", "%H:%M", "%S.%f"],
-        offset_formats=["", "%Y", "%b %Y", "%b %Y", "%b %-d %Y", "%b %-d %Y %H:%M"],
-        show_offset=True,
-    )
-    ax.xaxis.set_major_formatter(_formatter)
-    ax.xaxis.get_offset_text().set_color(MUTED_COLOR)
-    ax.xaxis.get_offset_text().set_fontsize(8)
-    fig.autofmt_xdate(rotation=25, ha="right")
+    # ── X-axis: always show "Mon YYYY" so the timeline is unambiguous ─────────
+    _span_days = (dates_plot[-1] - dates_plot[0]).days if len(dates_plot) > 1 else 1
+    if _span_days <= 60:
+        _major_loc = mdates.WeekdayLocator(byweekday=mdates.MO)
+        _major_fmt = mdates.DateFormatter("%-d %b %Y")
+        _minor_loc = mdates.DayLocator()
+    elif _span_days <= 365:
+        _major_loc = mdates.MonthLocator()
+        _major_fmt = mdates.DateFormatter("%b %Y")
+        _minor_loc = mdates.WeekdayLocator(byweekday=mdates.MO)
+    elif _span_days <= 365 * 2:
+        _major_loc = mdates.MonthLocator(bymonth=[1, 3, 5, 7, 9, 11])
+        _major_fmt = mdates.DateFormatter("%b %Y")
+        _minor_loc = mdates.MonthLocator()
+    else:
+        _major_loc = mdates.MonthLocator(bymonth=[1, 4, 7, 10])
+        _major_fmt = mdates.DateFormatter("%b %Y")
+        _minor_loc = mdates.MonthLocator()
+
+    ax.xaxis.set_major_locator(_major_loc)
+    ax.xaxis.set_major_formatter(_major_fmt)
+    ax.xaxis.set_minor_locator(_minor_loc)
+    ax.tick_params(axis="x", which="minor", length=3, color=GRID_COLOR)
+    fig.autofmt_xdate(rotation=30, ha="right")
+
+    # Year boundary lines — subtle vertical rule at each Jan 1
+    _y0, _y1 = dates_plot[0].year, dates_plot[-1].year
+    for _yr in range(_y0, _y1 + 1):
+        _jan1 = datetime(_yr, 1, 1, tzinfo=timezone.utc)
+        if dates_plot[0] <= _jan1 <= dates_plot[-1]:
+            ax.axvline(_jan1, color=MUTED_COLOR, linewidth=0.8, linestyle=":", alpha=0.55, zorder=2)
+            ax.text(_jan1, ax.get_ylim()[1], f" {_yr}", color=MUTED_COLOR,
+                    fontsize=7, va="top", alpha=0.7)
 
     ax.tick_params(colors=TEXT_COLOR, labelsize=9)
     for spine in ax.spines.values():
