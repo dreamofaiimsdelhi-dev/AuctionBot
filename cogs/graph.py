@@ -553,8 +553,11 @@ def build_graph(
 
     trend_line = slope * x_num + intercept
 
-    fig = plt.figure(figsize=(12, 7), facecolor=BG_DARK)
-    gs  = fig.add_gridspec(2, 1, height_ratios=[5, 1], hspace=0.08)
+    fig = plt.figure(figsize=(12, 7.8), facecolor=BG_DARK)
+    # height_ratios=[5,1]: main chart vs stats bar.
+    # hspace=0.35 gives enough room for the two-line x-axis labels (Mon\nYYYY)
+    # without colliding with the stats panel below.
+    gs  = fig.add_gridspec(2, 1, height_ratios=[5, 1], hspace=0.35)
     ax  = fig.add_subplot(gs[0])
     axs = fig.add_subplot(gs[1])
 
@@ -710,15 +713,13 @@ def build_graph(
         f"{full_title}  •  Price History{alltime_note}{raw_note}  •  {date_first} → {date_last} ({span_days}d)",
         color=TEXT_COLOR, fontsize=14, fontweight="bold", pad=10,
     )
-    if query_str and query_str.lower() not in ("all auctions",):
-        ax.set_xlabel(f"Filters: {query_str}", color=MUTED_COLOR, fontsize=8)
+    # Filter string is already shown in the Discord message subtitle — no need
+    # to repeat it as an xlabel which would collide with the x-axis tick labels.
 
     ax.legend(
         facecolor=BG_DARK, edgecolor=GRID_COLOR,
         labelcolor=TEXT_COLOR, fontsize=8,
         loc="upper left",
-        bbox_to_anchor=(-0.12, -0.03),
-        bbox_transform=ax.transAxes,
         borderpad=0.6,
         handlelength=1.5,
     )
