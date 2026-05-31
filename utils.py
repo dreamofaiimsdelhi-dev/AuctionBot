@@ -745,6 +745,37 @@ def build_query(
                     query[mongo_field] = True
             continue
 
+        # ── Exclude ───────────────────────────────────────────────────────────
+        # Must be handled BEFORE read_value_greedy() so that the kind token
+        # ("name", "evo", "type", etc.) is consumed separately from the
+        # argument value. If read_value_greedy() ran first it would swallow
+        # e.g. "type grass" as a single string and the kind check would fail.
+        #
+        # Syntax:  --ex <kind> <argument>
+        #   kind: name | evo | type | region | category/cat/group
+        # e.g.  --ex name meowth       → strictly Meowth only
+        #       --ex evo meowth        → whole evo family
+        #       --ex type grass        → all Grass-types
+        #       --ex region kanto      → all Kanto mons
+        #       --ex category event    → all event mons
+        # Stackable: each --ex clause adds to exclude_set independently.
+        # Falls back to legacy single-token auto-detect if kind is unknown.
+        if canonical == "--exclude":
+            kind_token = reader.next()
+            if kind_token and kind_token.lower() in _EX_KINDS:
+                # Read the actual argument (may be multi-word up to next flag)
+                arg_val = reader.read_value_greedy()
+                if arg_val:
+                    excluded = _resolve_exclude_names(kind_token.lower(), arg_val)
+                    if excluded:
+                        exclude_set.update(excluded)
+            elif kind_token:
+                # Legacy / unknown: treat kind_token itself as the value
+                excluded = _resolve_exclude_names("", kind_token.lower())
+                if excluded:
+                    exclude_set.update(excluded)
+            continue
+
         val = reader.read_value_greedy()
         if not val:
             continue
@@ -809,32 +840,6 @@ def build_query(
             names = get_pokemon_data_db().get_names_by_region(val.strip())
             if names:
                 _narrow_intersect(set(names))
-            continue
-
-        # ── Exclude ───────────────────────────────────────────────────────────
-        # Syntax:  --ex <kind> <argument>
-        #   kind: name | evo | type | region | category/cat/group
-        # e.g.  --ex name meowth       → strictly Meowth only
-        #       --ex evo meowth        → whole evo family
-        #       --ex type grass        → all Grass-types
-        #       --ex region kanto      → all Kanto mons
-        #       --ex category event    → all event mons
-        # Stackable: each --ex clause adds to exclude_set independently.
-        # Falls back to legacy single-token auto-detect if kind is unknown.
-        if canonical == "--exclude":
-            kind_token = val.strip().lower()
-            if kind_token in _EX_KINDS:
-                # Read the actual argument (may be multi-word up to next flag)
-                arg_val = reader.read_value_greedy()
-                if arg_val:
-                    excluded = _resolve_exclude_names(kind_token, arg_val)
-                    if excluded:
-                        exclude_set.update(excluded)
-            else:
-                # Legacy / unknown: treat the whole value as auto-detected
-                excluded = _resolve_exclude_names("", kind_token)
-                if excluded:
-                    exclude_set.update(excluded)
             continue
 
         # ── Name → UNION into name_pool ───────────────────────────────────────
