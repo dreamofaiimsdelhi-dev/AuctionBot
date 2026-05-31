@@ -32,6 +32,7 @@ import config
 from config import get_gender_emoji, REPLY
 from filters import all_flags_help
 from filters import FLAG_DEFINITIONS
+from categories import list_categories
 from utils import (
     build_query, format_date, iv_line,
     format_winning_bid, format_winning_bid_long,
@@ -98,6 +99,145 @@ def _result_line(r: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FILTERS VIEW  (paginated, ephemeral — opened by the 📋 All Filters button)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pages are defined as static groups so each fits within Discord's char limit.
+_FILTER_PAGES: list[tuple[str, list[str]]] = [
+    (
+        "🔤 Name / Identity",
+        [
+            "`--name <value>`  _--n / --pokemon / --poke_ — Pokémon name. Expands to all forms with the same dex number in search.",
+            "`--gender <value>`  _--sex / --g_ — Gender: `male`, `female`, `unknown`",
+            "`--nature <value>`  _-nat / --nat_ — Nature (case-insensitive, e.g. `timid`)",
+            "`--shiny`  _--sh / --shinys_ — Shiny Pokémon only",
+            "`--gmax`  _--gigantamax / --gm / --giga_ — Gigantamax only",
+            "`--evo <value>`  _--evolution / --family / --fam_ — All Pokémon in the same evo family",
+            "`--region <value>`  _--r / --reg_ — Filter by region (e.g. `kanto`, `galar`)",
+            "`--type <value>`  _--t / --types_ — Filter by type. Stackable up to 2 (e.g. `--type fire --type flying`)",
+        ],
+    ),
+    (
+        "📊 IVs",
+        [
+            "`--iv <value>`  _--totaliv / --iv%_ — Total IV % (e.g. `90`, `>90`, `>=85.5`)",
+            "`--hpiv <value>`  _--hp / --ivhp_ — HP IV",
+            "`--atkiv <value>`  _--atk / --ivatk / --attack_ — Attack IV",
+            "`--defiv <value>`  _--def / --ivdef / --defense_ — Defense IV",
+            "`--spatkiv <value>`  _--spatk / --spa / --sp_atk_ — Sp. Attack IV",
+            "`--spdefiv <value>`  _--spdef / --spd / --sp_def_ — Sp. Defense IV",
+            "`--spdiv <value>`  _--spe / --speed / --speediv_ — Speed IV",
+            "─",
+            "**Multi-IV count filters** — at least N IVs equal a value:",
+            "`--triple <value>`  _--three / --tri_ — At least 3 IVs equal this (e.g. `--triple 31`)",
+            "`--quadruple <value>`  _--quad / --four_ — At least 4 IVs equal this",
+            "`--pentuple <value>`  _--penta / --five_ — At least 5 IVs equal this",
+            "`--hextuple <value>`  _--hex / --six_ — All 6 IVs equal this (e.g. `--hex 31` for perfect)",
+            "─",
+            "**Operator syntax** for all numeric fields:",
+            "`31` · `>30` · `>=30` · `<100` · `<=100` · `30-100`",
+        ],
+    ),
+    (
+        "💰 Price / Sort / Misc",
+        [
+            "`--price <value>`  _--p / --bid_ — Price filter (e.g. `5000`, `>5000`, `500-5000`)",
+            "`--minprice <value>`  _--minbid_ — Min price shorthand (same as `--price >=N`)",
+            "`--maxprice <value>`  _--maxbid_ — Max price shorthand (same as `--price <=N`)",
+            "`--seller <value>`  _--se / --soldby_ — @mention or ID for exact match; text matches name",
+            "`--bidder <value>`  _--b / --buyer / --wonby_ — Bidder Discord @mention or ID",
+            "`--move <value>`  _-m / --moves_ — Has this move. Stackable.",
+            "`--limit <value>`  _--lim / --max / --top_ — Cap results to N most recent",
+            "`--sort <value>`  _--orderby / --order_ — Sort order:",
+            "　`iv+` / `iv-`  ·  `bid+` / `bid-`  ·  `level+` / `level-`",
+            "　`date+` / `date-` _(default)_  ·  `id+` / `id-`",
+        ],
+    ),
+    (
+        "🚫 Exclude / Category filters",
+        [
+            "`--category <value>`  _--c / --cat / --group_ — Filter by category (see next page for list)",
+            "`--noshiny`  _--nonshiny / --excludeshiny / --nosh_ — Exclude shiny Pokémon",
+            "`--nogmax`  _--nongmax / --excludegmax / --nogm_ — Exclude Gigantamax Pokémon",
+            "─",
+            "**`--exclude`** (aliases: `--ex / --not / --no / --except / --without`)",
+            "Stackable. Syntax: `--ex <kind> <value>`",
+            "`--ex name <name>` — exclude one exact Pokémon",
+            "`--ex evo <name>` — exclude entire evo family",
+            "`--ex type <type>` — exclude all Pokémon of a type",
+            "`--ex region <region>` — exclude all Pokémon from a region",
+            "`--ex category <cat>` — exclude a whole category (e.g. `--ex category event`)",
+            "─",
+            "**Examples:**",
+            "`--category legendaries --noshiny` — legends, no shinies",
+            "`--ex category event --ex type ghost` — no events, no ghost-types",
+            "`--nogmax --price <5000` — no Gmax, under 5 000 coins",
+            "`--triple 31 --sort bid-` — at least 3×31 IV, priciest first",
+            "`--name pikachu --shiny --iv >90` — shiny high-IV Pikachus",
+        ],
+    ),
+]
+
+
+def create_filters_view(page: int = 0) -> discord.ui.LayoutView:
+    """Paginated ephemeral view shown when the 📋 All Filters button is clicked."""
+    from categories import list_categories
+
+    # Build the categories page dynamically so new cats appear automatically
+    cat_lines: list[str] = []
+    for c in list_categories():
+        shortcuts = " / ".join(f"`--{a}`" for a in c["aliases"][:3])
+        shortcut_part = f"  _{shortcuts}_" if shortcuts else ""
+        cat_lines.append(f"`--category {c['key']}`{shortcut_part} — {c['name']}")
+
+    pages: list[tuple[str, list[str]]] = list(_FILTER_PAGES) + [
+        ("📦 Categories", cat_lines)
+    ]
+
+    TOTAL = len(pages)
+    page  = max(0, min(page, TOTAL - 1))
+
+    title, lines = pages[page]
+    page_label   = f"Page {page + 1}/{TOTAL}"
+
+    class PrevBtn(discord.ui.Button):
+        def __init__(self):
+            super().__init__(
+                style=discord.ButtonStyle.secondary,
+                label="◀ Prev",
+                custom_id="f_prev",
+                disabled=(page == 0),
+            )
+        async def callback(self, interaction: discord.Interaction):
+            await interaction.response.edit_message(view=create_filters_view(page - 1))
+
+    class NextBtn(discord.ui.Button):
+        def __init__(self):
+            super().__init__(
+                style=discord.ButtonStyle.secondary,
+                label="Next ▶",
+                custom_id="f_next",
+                disabled=(page >= TOTAL - 1),
+            )
+        async def callback(self, interaction: discord.Interaction):
+            await interaction.response.edit_message(view=create_filters_view(page + 1))
+
+    class FiltersView(discord.ui.LayoutView):
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(content=f"**📋 {title}** — _{page_label}_"),
+            discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+            discord.ui.TextDisplay(content="\n".join(lines)),
+            discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+            discord.ui.ActionRow(PrevBtn(), NextBtn()),
+            accent_colour=config.EMBED_COLOR,
+        )
+        def __init__(self):
+            super().__init__(timeout=180)
+
+    return FiltersView()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SEARCH VIEW  (factory, paginated)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -109,6 +249,7 @@ def create_search_view(
     query_str: str,
     current_page: int = 0,
     limit: int | None = None,
+    raw_tokens: list[str] | None = None,
 ) -> discord.ui.LayoutView:
 
     # Effective total respects --limit
@@ -166,7 +307,162 @@ def create_search_view(
                     view=_error_view("❌ Not your search!"), ephemeral=True)
                 return
             await interaction.response.edit_message(
-                view=create_search_view(user_id, query, sort, total, query_str, current_page + 1, limit))
+                view=create_search_view(user_id, query, sort, total, query_str, current_page + 1, limit, raw_tokens))
+
+    # ── Helper: rebuild view with modified token list ──────────────────────────
+    _tokens = raw_tokens or []
+
+    def _has_flag(tokens: list[str], *flags: str) -> bool:
+        """Check if any of the given flags exist in the token list."""
+        return any(t.lower() in flags for t in tokens)
+
+    def _remove_flag(tokens: list[str], *flags: str) -> list[str]:
+        """Remove a boolean flag from the token list."""
+        return [t for t in tokens if t.lower() not in flags]
+
+    def _add_flag(tokens: list[str], flag: str) -> list[str]:
+        """Append a boolean flag to the token list."""
+        return tokens + [flag]
+
+    def _remove_flag_with_arg(tokens: list[str], flag: str, arg_value: str) -> list[str]:
+        """Remove --flag <arg_value> pair (case-insensitive) from token list."""
+        result, i = [], 0
+        flag_l, arg_l = flag.lower(), arg_value.lower()
+        while i < len(tokens):
+            if tokens[i].lower() == flag_l and i + 1 < len(tokens) and tokens[i + 1].lower() == arg_l:
+                i += 2  # skip flag + its arg
+            else:
+                result.append(tokens[i])
+                i += 1
+        return result
+
+    def _has_flag_with_arg(tokens: list[str], flag: str, arg_value: str) -> bool:
+        """Check if --flag <arg_value> exists in token list."""
+        flag_l, arg_l = flag.lower(), arg_value.lower()
+        for i in range(len(tokens) - 1):
+            if tokens[i].lower() == flag_l and tokens[i + 1].lower() == arg_l:
+                return True
+        return False
+
+    def _tokens_to_query_str(tokens: list[str]) -> str:
+        return " ".join(tokens) if tokens else "All auctions"
+
+    def _rebuild_view(new_tokens: list[str]) -> discord.ui.LayoutView:
+        new_query, new_sort, new_limit = build_query(new_tokens, expand_name_by_dex=True)
+        new_total = _col.count_documents(new_query)
+        new_qstr  = _tokens_to_query_str(new_tokens)
+        if new_total == 0:
+            return _error_view("❌ No auctions found after applying that filter.")
+        return create_search_view(user_id, new_query, new_sort, new_total, new_qstr, 0, new_limit, new_tokens)
+
+    # ── Shiny was explicitly requested (--shiny / --sh / --shinys) ─────────────
+    _SHINY_FLAGS = frozenset(["--shiny", "--sh", "--shinys"])
+    _NOSHINY_FLAGS = frozenset(["--noshiny", "--nonshiny", "--excludeshiny", "--nosh"])
+    _NOGMAX_FLAGS  = frozenset(["--nogmax", "--nongmax", "--excludegmax", "--nogm"])
+
+    _shiny_requested     = _has_flag(_tokens, *_SHINY_FLAGS)
+    _noshiny_active      = _has_flag(_tokens, *_NOSHINY_FLAGS)
+    _nogmax_active       = _has_flag(_tokens, *_NOGMAX_FLAGS)
+
+    # Check for "--ex category event" (all --exclude aliases + category aliases)
+    _EX_ALIASES_SET  = frozenset(["--exclude", "--ex", "--not", "--no", "--except", "--without"])
+    _CAT_KINDS_SET   = frozenset(["category", "cat", "group"])
+
+    def _has_ex_category_event(tokens: list[str]) -> bool:
+        for i in range(len(tokens) - 2):
+            if (tokens[i].lower() in _EX_ALIASES_SET
+                    and tokens[i+1].lower() in _CAT_KINDS_SET
+                    and tokens[i+2].lower() == "event"):
+                return True
+        return False
+
+    _no_event_active = _has_ex_category_event(_tokens)
+
+    # ── Filter buttons ─────────────────────────────────────────────────────────
+
+    class AllFiltersBtn(discord.ui.Button):
+        def __init__(self):
+            super().__init__(
+                style=discord.ButtonStyle.primary,
+                label="📋 All Filters",
+                custom_id="s_allfilters",
+            )
+        async def callback(self, interaction: discord.Interaction):
+            await interaction.response.send_message(
+                view=create_filters_view(page=0), ephemeral=True
+            )
+
+    class ExcludeShinyBtn(discord.ui.Button):
+        def __init__(self):
+            # Active = currently excluding shinies (button shows as green/on)
+            # Disabled when shiny was specifically requested (--sh/--shiny)
+            active = _noshiny_active
+            super().__init__(
+                style=discord.ButtonStyle.success if active else discord.ButtonStyle.secondary,
+                label="✨ Exclude Shiny" if not active else "✨ Shiny Excluded",
+                custom_id="s_exshiny",
+                disabled=_shiny_requested,
+            )
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != user_id:
+                await interaction.response.send_message(
+                    view=_error_view("❌ Not your search!"), ephemeral=True)
+                return
+            if _noshiny_active:
+                new_tokens = _remove_flag(list(_tokens), *_NOSHINY_FLAGS)
+            else:
+                new_tokens = _add_flag(list(_tokens), "--noshiny")
+            await interaction.response.edit_message(view=_rebuild_view(new_tokens))
+
+    class ExcludeGmaxBtn(discord.ui.Button):
+        def __init__(self):
+            active = _nogmax_active
+            super().__init__(
+                style=discord.ButtonStyle.success if active else discord.ButtonStyle.secondary,
+                label="⚡ Gmax Excluded" if active else "⚡ Exclude Gmax",
+                custom_id="s_exgmax",
+            )
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != user_id:
+                await interaction.response.send_message(
+                    view=_error_view("❌ Not your search!"), ephemeral=True)
+                return
+            if _nogmax_active:
+                new_tokens = _remove_flag(list(_tokens), *_NOGMAX_FLAGS)
+            else:
+                new_tokens = _add_flag(list(_tokens), "--nogmax")
+            await interaction.response.edit_message(view=_rebuild_view(new_tokens))
+
+    class ExcludeEventBtn(discord.ui.Button):
+        def __init__(self):
+            active = _no_event_active
+            super().__init__(
+                style=discord.ButtonStyle.success if active else discord.ButtonStyle.secondary,
+                label="🎉 Event Excluded" if active else "🎉 Exclude Event",
+                custom_id="s_exevent",
+            )
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != user_id:
+                await interaction.response.send_message(
+                    view=_error_view("❌ Not your search!"), ephemeral=True)
+                return
+            if _no_event_active:
+                # Remove the "--ex category event" triplet
+                result, i = [], 0
+                toks = list(_tokens)
+                while i < len(toks):
+                    if (toks[i].lower() in _EX_ALIASES_SET
+                            and i + 2 < len(toks)
+                            and toks[i+1].lower() in _CAT_KINDS_SET
+                            and toks[i+2].lower() == "event"):
+                        i += 3
+                    else:
+                        result.append(toks[i])
+                        i += 1
+                new_tokens = result
+            else:
+                new_tokens = list(_tokens) + ["--ex", "category", "event"]
+            await interaction.response.edit_message(view=_rebuild_view(new_tokens))
 
     # Shiny check: only True (not {"$ne": True}) means shiny search
     accent    = config.SHINY_EMBED_COLOR if query.get("sh") is True else config.EMBED_COLOR
@@ -184,6 +480,16 @@ def create_search_view(
             discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
             discord.ui.ActionRow(PrevBtn(), NextBtn()),
         ]
+    # Separator + filter buttons — always shown under prev/next
+    inner += [
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+        discord.ui.ActionRow(
+            AllFiltersBtn(),
+            ExcludeShinyBtn(),
+            ExcludeGmaxBtn(),
+            ExcludeEventBtn(),
+        ),
+    ]
 
     class SearchView(discord.ui.LayoutView):
         container = discord.ui.Container(*inner, accent_colour=accent)
@@ -518,7 +824,7 @@ class Auction(commands.Cog):
 
         query_str = filters.strip() or "All auctions"
         await ctx.send(
-            view=create_search_view(ctx.author.id, query, sort, total, query_str, 0, limit),
+            view=create_search_view(ctx.author.id, query, sort, total, query_str, 0, limit, raw),
             allowed_mentions=SAFE_MENTIONS
         )
 
