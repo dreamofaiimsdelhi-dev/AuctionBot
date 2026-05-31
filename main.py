@@ -27,6 +27,7 @@ log = logging.getLogger("main")
 
 # ─── Cogs to load ─────────────────────────────────────────────────────────────
 COGS = [
+    "cogs.usage_logger",
     "cogs.auction",
     "cogs.graph",
     "cogs.price",
