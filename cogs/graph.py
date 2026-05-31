@@ -1458,7 +1458,7 @@ class Graph(commands.Cog):
                     else:
                         # currently clean → button offers raw mode
                         _style = discord.ButtonStyle.secondary
-                        _label = "⚠️ Show Outliers (Raw Data)"
+                        _label = "⚠️ Include Outliers too"
                     super().__init__(style=_style, label=_label, custom_id="g_outliers_toggle")
                 async def callback(self, interaction: discord.Interaction):
                     await regenerate_fn(interaction, _is_alltime_cap, not _is_outliers_cap)
