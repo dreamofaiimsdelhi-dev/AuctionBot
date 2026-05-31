@@ -1263,50 +1263,64 @@ class Stats(commands.Cog):
 
     @commands.hybrid_command(name="auction_stats", aliases=["stats"])
     @app_commands.describe(user="User to look up (leave empty for yourself)")
-    async def stats_cmd(self, ctx: commands.Context, *, user: discord.Member | discord.User | str | None = None):
+    async def stats_cmd(self, ctx: commands.Context, *, user: discord.Member | discord.User | None = None):
         """Show detailed auction stats for a user"""
+        # user is resolved by discord.py for both slash (Member/User object) and
+        # prefix (@mention → Member/User object).  Plain text (ID or username)
+        # only arrives here as None because conversion failed — we handle that
+        # in stats_cmd_error below.
+        target: discord.User | discord.Member | None = user or ctx.author
+
+        async with ctx.typing():
+            data = await _fetch_user_data(target.id)
+            view = _build_user_stats_view(target, data=data)
+        await ctx.reply(view=view, mention_author=False)
+
+    @stats_cmd.error
+    async def stats_cmd_error(self, ctx: commands.Context, error: commands.CommandError):
+        """
+        Fallback for prefix-command usage where the argument couldn't be
+        resolved to a Member/User automatically — e.g. a plain user ID or
+        display name typed without a mention.
+        """
+        if not isinstance(error, commands.BadArgument):
+            raise error  # let everything else bubble up
+
+        raw_input = ctx.current_argument or ""
+        raw = raw_input.strip().lstrip("<@!").rstrip(">")
         target: discord.User | discord.Member | None = None
 
-        if isinstance(user, (discord.Member, discord.User)):
-            # Slash command resolved the mention to a Member/User object directly
-            target = user
-        elif isinstance(user, str):
-            # Prefix command — parse the raw string
-            raw = user.strip().lstrip("<@!").rstrip(">")
-            if raw.isdigit():
-                uid = int(raw)
-                target = ctx.guild.get_member(uid) if ctx.guild else None
-                if target is None:
-                    try:
-                        target = await self.bot.fetch_user(uid)
-                    except discord.NotFound:
-                        await ctx.reply(
-                            view=_error_view("❌ No user found with that ID."),
-                            mention_author=False,
-                        )
-                        return
-                    except discord.HTTPException:
-                        await ctx.reply(
-                            view=_error_view("❌ Something went wrong while looking up that user."),
-                            mention_author=False,
-                        )
-                        return
-            else:
-                # treat as a username/display name — search guild members
-                if ctx.guild:
-                    target = discord.utils.find(
-                        lambda m: m.name.lower() == raw.lower() or m.display_name.lower() == raw.lower(),
-                        ctx.guild.members,
-                    )
-                if target is None:
+        if raw.isdigit():
+            uid = int(raw)
+            target = ctx.guild.get_member(uid) if ctx.guild else None
+            if target is None:
+                try:
+                    target = await self.bot.fetch_user(uid)
+                except discord.NotFound:
                     await ctx.reply(
-                        view=_error_view(f"❌ No user found matching `{raw}`."),
+                        view=_error_view("❌ No user found with that ID."),
                         mention_author=False,
                     )
                     return
-
-        if target is None:
-            target = ctx.author
+                except discord.HTTPException:
+                    await ctx.reply(
+                        view=_error_view("❌ Something went wrong while looking up that user."),
+                        mention_author=False,
+                    )
+                    return
+        else:
+            # Try display name / username match against guild members
+            if ctx.guild:
+                target = discord.utils.find(
+                    lambda m: m.name.lower() == raw.lower() or m.display_name.lower() == raw.lower(),
+                    ctx.guild.members,
+                )
+            if target is None:
+                await ctx.reply(
+                    view=_error_view(f"❌ No user found matching `{raw}`."),
+                    mention_author=False,
+                )
+                return
 
         async with ctx.typing():
             data = await _fetch_user_data(target.id)
