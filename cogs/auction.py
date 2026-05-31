@@ -746,7 +746,7 @@ class Auction(commands.Cog):
         await ctx.send(view=create_help_view())
 
     @auction_group.command(name="search", aliases=["s"])
-    @app_commands.describe(filters="Filters e.g: --name pikachu --shiny --iv >90 --sort price")
+    @app_commands.describe(filters="Filters e.g: --n pikachu --nosh --nogm --iv >90 --sort bid")
     async def auction_search(self, ctx: commands.Context, *, filters: str = ""):
         """Search past auctions with filters"""
         raw = filters.split() if filters else []
