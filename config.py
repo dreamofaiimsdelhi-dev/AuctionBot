@@ -10,7 +10,7 @@ MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "auctions")
 COMMAND_PREFIX  = ["n!", "N!","a!", "A!"]
 
 # ─── Pagination ───────────────────────────────────────────────────────────────
-RESULTS_PER_PAGE = 10
+RESULTS_PER_PAGE = 15
 
 # ─── Colors (must be discord.Colour for Components V2 accent_colour) ─────────
 EMBED_COLOR = discord.Colour(0x1E1F22)  # default / normal
