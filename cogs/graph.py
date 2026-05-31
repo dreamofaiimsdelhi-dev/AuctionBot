@@ -407,7 +407,7 @@ def build_compare_graph(
     )
 
     # ── Per-series stats bar ──────────────────────────────────────────────────
-    cols      = ["Pokémon", "Sales", "Min", "Max", "Avg", "Median", "Trend"]
+    cols      = ["Pokémon", "Sales", "Chart Min", "Chart Max", "Avg", "Median", "Trend"]
     col_xs    = [0.04, 0.18, 0.30, 0.42, 0.54, 0.66, 0.82]
     header_y  = 0.82
     value_y   = 0.35
@@ -626,9 +626,9 @@ def build_graph(
             arrowprops=dict(arrowstyle="-", color=color, lw=1.2),
         )
 
-    _annotate_point(idx_max, f"Max\n{_format_price(prices_plot.max())}",
+    _annotate_point(idx_max, f"Chart Max\n{_format_price(prices_plot.max())}",
                     pal.get("trend_up",   "#06d6a0"), prefer_above=True)
-    _annotate_point(idx_min, f"Min\n{_format_price(prices_plot.min())}",
+    _annotate_point(idx_min, f"Chart Min\n{_format_price(prices_plot.min())}",
                     pal.get("trend_down", "#ef476f"), prefer_above=False)
 
     # ── X-axis: two-level labels — months on first row, year on second row ─────
@@ -757,15 +757,19 @@ def build_graph(
     LEG_FRAC = 0.27
     S0    = LEG_FRAC + 0.015
     S1    = 1.0
-    col_w = (S1 - S0) / 6
+    col_w = (S1 - S0) / 7
+
+    at_min = prices.min()
+    at_max = prices.max()
 
     paired_cols = [
-        ("Min",      _format_price(p_min),  "Max",    _format_price(p_max)),
-        ("Avg",      _format_price(p_avg),  "Median", _format_price(p_med)),
-        ("Auctions", f"{total:,}",          None,     None),
-        ("Std Dev",  _format_price(p_std),  None,     None),
-        ("Trend",    f"{trend_arrow} {_format_price(abs(slope))}/sale", None, None),
-        ("Outliers", "All Included" if show_outliers else (f"{n_outliers} hidden" if n_outliers else "None"), None, None),
+        ("Chart Min",    _format_price(p_min),  "Chart Max",    _format_price(p_max)),
+        ("All-time Min", _format_price(at_min),  "All-time Max", _format_price(at_max)),
+        ("Avg",          _format_price(p_avg),  "Median",       _format_price(p_med)),
+        ("Auctions",     f"{total:,}",          None,           None),
+        ("Std Dev",      _format_price(p_std),  None,           None),
+        ("Trend",        f"{trend_arrow} {_format_price(abs(slope))}/sale", None, None),
+        ("Outliers",     "All Included" if show_outliers else (f"{n_outliers} hidden" if n_outliers else "None"), None, None),
     ]
 
     # y-coords for paired rows (two label+value pairs stacked)
@@ -1226,17 +1230,16 @@ class Graph(commands.Cog):
             f"{REPLY} **Avg Line** — smoothed average price over time; shows the general price direction\n"
             f"{REPLY} **Trend** (dashed) — linear regression line; green means price rising over time, red means falling\n"
             f"{REPLY} **Shaded band** — the middle 50% of sales (25th–75th percentile); wide band = inconsistent prices, narrow = stable market\n"
-            f"{REPLY} **Min / Max markers** — the single cheapest and most expensive sale ever recorded\n\n"
+            f"{REPLY} **Chart Min / Chart Max markers** — the cheapest and most expensive sale visible on the graph (outliers excluded)\n\n"
             f"**📊 Stats Bar**\n"
             f"{REPLY} **Auctions** — total number of sales plotted\n"
-            f"{REPLY} **Min / Max** — lowest and highest winning bid\n"
+            f"{REPLY} **Chart Min / Chart Max** — lowest and highest winning bid visible on the graph (outliers excluded)\n"
+            f"{REPLY} **All-time Min / All-time Max** — the absolute lowest and highest sale ever recorded, including any outliers\n"
             f"{REPLY} **Avg** — mean price across all auctions\n"
             f"{REPLY} **Median** — middle price (less affected by extreme outliers than avg)\n"
             f"{REPLY} **Std Dev** — how spread out prices are; high = big price swings, low = consistent\n"
             f"{REPLY} **Trend** — average price change per sale (▲ rising, ▼ falling)\n"
-            f"{REPLY} **Outliers** — sales so far above the typical price range they squash everything else. Excluded from the graph and most stats\n"
-            f"{REPLY} **Chart Max** — highest sale visible on the graph (outliers excluded)\n"
-            f"{REPLY} **All-time Max** — the absolute highest sale ever recorded, including outliers"
+            f"{REPLY} **Outliers** — sales so far above the typical price range they squash everything else. Excluded from the graph and most stats"
         )
 
         _filters_body = (
