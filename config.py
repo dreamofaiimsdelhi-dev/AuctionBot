@@ -13,7 +13,7 @@ COMMAND_PREFIX  = ["n!", "N!","a!", "A!"]
 RESULTS_PER_PAGE = 15
 
 # ─── Colors (must be discord.Colour for Components V2 accent_colour) ─────────
-EMBED_COLOR = discord.Colour(0x1E1F22)  # default / normal
+EMBED_COLOR = discord.Colour(0x4A5568)  # default / normal
 SHINY_EMBED_COLOR  = discord.Colour(0xfe9ac9)   # shiny pokemon
 GMAX_EMBED_COLOR   = discord.Colour(0xe65100)   # gigantamax
 
