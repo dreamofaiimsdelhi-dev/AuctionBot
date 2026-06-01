@@ -847,11 +847,16 @@ def build_query(
             if expand_name_by_dex:
                 # Strip trailing 'only' keyword (case-insensitive)
                 # e.g. "blastoise only" → exact=True, val="blastoise"
+                # OR strip leading 'normal' prefix (case-insensitive)
+                # e.g. "normal meowth" → exact=True, val="meowth"
                 exact_only = False
                 val_stripped = val.strip()
                 if val_stripped.lower().endswith(" only"):
                     exact_only = True
                     val_stripped = val_stripped[:-5].strip()  # remove " only"
+                elif val_stripped.lower().startswith("normal "):
+                    exact_only = True
+                    val_stripped = val_stripped[7:].strip()   # remove "normal "
 
                 if exact_only:
                     # Resolve to a single canonical name, no form expansion
