@@ -798,10 +798,12 @@ class Auction(commands.Cog):
                     name_parts.append(raw[i])
                     i += 1
                 name_val = " ".join(name_parts).strip()
-                # Strip trailing "only" keyword that build_query handles
+                # Strip trailing "only" / leading "normal" prefix that build_query handles
                 check_val = name_val
                 if check_val.lower().endswith(" only"):
                     check_val = check_val[:-5].strip()
+                elif check_val.lower().startswith("normal "):
+                    check_val = check_val[7:].strip()
                 if check_val:
                     # Valid if FormsDB knows it OR the name DB resolves it
                     forms_hit = bool(get_forms_db().resolve_name_to_forms(check_val))
