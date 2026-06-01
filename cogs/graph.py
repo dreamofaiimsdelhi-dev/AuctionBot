@@ -991,8 +991,19 @@ class Graph(commands.Cog):
             for flag in _NAME_FLAGS:
                 if flag in tokens:
                     idx = tokens.index(flag)
-                    if idx + 1 < len(tokens):
-                        return tokens[idx + 1].title()
+                    # Collect all value tokens until the next flag
+                    parts = []
+                    j = idx + 1
+                    while j < len(tokens) and not tokens[j].startswith("-"):
+                        parts.append(tokens[j])
+                        j += 1
+                    name_val = " ".join(parts).strip()
+                    # Strip "only" suffix / "normal" prefix so chart title is clean
+                    if name_val.lower().endswith(" only"):
+                        name_val = name_val[:-5].strip()
+                    elif name_val.lower().startswith("normal "):
+                        name_val = name_val[7:].strip()
+                    return name_val.title() if name_val else None
             return None
 
         _requested_name = _requested_name_from_tokens(raw)
@@ -1273,11 +1284,7 @@ class Graph(commands.Cog):
         _protip_text = (
             f"-# 💡 **Pro tip:** Use `--limit` to focus on the most recent auctions — "
             f"e.g. `j!g --name garchomp --limit 50` graphs only the latest 50 sales, "
-            f"giving you a much cleaner picture of where prices stand today. "
-            f"Add `--nosh` to exclude shinies if you only want non-shiny data. "
-            f"By default both shiny and non-shiny are plotted together (e.g. `j!g --n meowth --iv >70`). "
-            f"Want only the base form? Use `--n normal meowth` — this excludes regional/alternate forms "
-            f"like Alolan Meowth, Galarian Meowth, or Gmax variants from the graph."
+            f"giving you a much cleaner picture of where prices stand today. Also add --nosh to exlude shinies, if you are not looking to plot shiny of this pokemon for graph. By Default Both shiny and Normal are plotted for a general command like --n meowth --iv >70 "
         )
 
         # ── Build outlier BytesIO if needed — used only by the button callback ─
