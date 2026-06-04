@@ -447,6 +447,95 @@ def get_pokemon_image_url(pokemon_name: str, shiny: bool = False) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SPAWN RATE DB  (loaded once from data/spawnrates.csv)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPAWNRATES_CSV_FILE = Path("data/spawnrates.csv")
+
+
+class SpawnRateDB:
+    """
+    Loads data/spawnrates.csv  (columns: Dex, Pokemon, Chance, Chance percentage)
+    where Chance looks like "1/225".
+
+    Provides:
+      get_names_by_spawnrate(user_input) → list[str]
+
+    Accepts user_input in several forms:
+      "1/225"   → denominator = 225
+      "225"     → denominator = 225
+      "1/337"   → denominator = 337
+    Returns the list of canonical Pokémon names at that exact denominator.
+    """
+
+    def __init__(self, csv_path: Path, name_db: PokemonNameDB):
+        # denominator (int) → set of canonical names
+        self._denom_to_names: dict[int, set[str]] = {}
+        self._load(csv_path, name_db)
+
+    def _load(self, path: Path, name_db: PokemonNameDB):
+        if not path.exists():
+            print(f"[WARN] spawnrates.csv not found at {path}")
+            return
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                raw_name   = row.get("Pokemon", "").strip()
+                raw_chance = row.get("Chance", "").strip()
+                if not raw_name or not raw_chance:
+                    continue
+                # Parse denominator from "1/225"
+                if "/" in raw_chance:
+                    try:
+                        denom = int(raw_chance.split("/")[1])
+                    except (ValueError, IndexError):
+                        continue
+                else:
+                    try:
+                        denom = int(raw_chance)
+                    except ValueError:
+                        continue
+                canonical = name_db.resolve(raw_name) or raw_name
+                self._denom_to_names.setdefault(denom, set()).add(canonical)
+
+    def parse_denominator(self, user_input: str) -> int | None:
+        """Parse '1/225' or '225' into 225. Returns None if unparseable."""
+        s = user_input.strip()
+        if "/" in s:
+            try:
+                return int(s.split("/")[1])
+            except (ValueError, IndexError):
+                return None
+        try:
+            return int(s)
+        except ValueError:
+            return None
+
+    def get_names_by_spawnrate(self, user_input: str) -> list[str]:
+        denom = self.parse_denominator(user_input)
+        if denom is None:
+            return []
+        return list(self._denom_to_names.get(denom, set()))
+
+    def all_denominators(self) -> list[int]:
+        return sorted(self._denom_to_names.keys())
+
+
+_spawnrate_db: SpawnRateDB | None = None
+
+
+def get_spawnrate_db() -> SpawnRateDB:
+    global _spawnrate_db
+    if _spawnrate_db is None:
+        _spawnrate_db = SpawnRateDB(SPAWNRATES_CSV_FILE, get_name_db())
+    return _spawnrate_db
+
+
+def get_names_by_spawnrate(user_input: str) -> list[str]:
+    return get_spawnrate_db().get_names_by_spawnrate(user_input)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NUMERIC OPERATOR PARSER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -793,7 +882,8 @@ def build_query(
             sv = val.lower().strip()
             sort_field_map = {
                 "iv":    "iv",
-                "bid": "bid",
+                "bid":   "bid",
+                "price": "bid",   # alias: --sort price / --sort price-
                 "level": "lv",
                 "date":  "ts",
                 "id":    "aid",
@@ -821,6 +911,13 @@ def build_query(
             family = get_evo_family(val)
             if family:
                 _pool_add(set(family))
+            continue
+
+        # ── Spawn rate → INTERSECT into narrow_set ───────────────────────────
+        if canonical == "--spawnrate":
+            sr_names = get_names_by_spawnrate(val.strip())
+            if sr_names:
+                _narrow_intersect(set(sr_names))
             continue
 
         # ── Type → INTERSECT into narrow_set ─────────────────────────────────
