@@ -518,14 +518,19 @@ def build_graph(
     alltime: bool = False,
     show_outliers: bool = False,
     pokemon_name: str | None = None,
-) -> io.BytesIO:
+) -> tuple[io.BytesIO, list, int]:
     """
-    Build a dark-themed price history chart and return a PNG BytesIO buffer.
+    Build a dark-themed price history chart and return (buf, outliers, fetched_count).
+    fetched_count is the number of records received before subsampling — use it in
+    subtitles so users can distinguish "fetched from DB" from "plotted dots".
     Records use short field names: ts = unix_timestamp, bid = winning_bid, pn = pokemon_name.
     If pokemon_name is provided it is used as the chart title instead of the DB's pn field
     (which can be a form name like 'Snowman Pikachu' even when the user asked for 'pikachu').
     """
     records = sorted(records, key=lambda r: r.get("ts", 0))
+
+    # ── Capture fetched count BEFORE subsampling (used in subtitle) ────────────
+    fetched_count = len(records)
 
     # ── Capture true all-time min/max from the FULL dataset BEFORE subsampling ──
     # Subsampling with a step can silently skip the highest/lowest bid record.
@@ -886,7 +891,7 @@ def build_graph(
     plt.close(fig)
     buf.seek(0)
     # Each outlier entry: (date, price, record, kind) — kind is "high" or "low"
-    return buf, list(zip(outlier_dates, outlier_prices.tolist(), outlier_records, outlier_kinds))
+    return buf, list(zip(outlier_dates, outlier_prices.tolist(), outlier_records, outlier_kinds)), fetched_count
 
 
 def build_outlier_image(
@@ -1059,60 +1064,39 @@ class Graph(commands.Cog):
         # We use these as the "variant/filter" tokens for every pokemon query.
 
         # ── Combined validation: invalid Pokémon names + unknown flags ─────────
-        # Names come from multi_names (already extracted above).
-        # Unknown flags are checked against raw_no_names (remaining tokens after
-        # name/evo/sr extraction) plus the graph-only flags already consumed.
-        # We collect ALL errors before sending anything.
         from filters import is_flag, is_category_shortcut, resolve_flag
         from utils import get_forms_db
 
-        # Graph-only flags already stripped from raw; define them so we don't
-        # flag them as unknown when scanning the original token list.
         _GRAPH_ONLY_FLAGS = frozenset({
             FLAG_ALLTIME, FLAG_WITHOUTLIERS, FLAG_SINCE, FLAG_BEFORE, FLAG_COMPARE,
         })
-        _EXTRACTED_FLAGS = (
-            _MULTI_NAME_FLAGS_ALL
-            | _SPAWNRATE_FLAGS
-            | _evo_flags
-            | _GRAPH_ONLY_FLAGS
-        )
+        _EXTRACTED_FLAGS = _MULTI_NAME_FLAGS_ALL | _SPAWNRATE_FLAGS | _evo_flags | _GRAPH_ONLY_FLAGS
 
         _invalid_names: list[str] = []
         _unknown_flags: list[str] = []
 
-        # Validate every name supplied via --n / --name
         for mname in multi_names:
             check = mname
-            if check.lower().endswith(" only"):
-                check = check[:-5].strip()
-            elif check.lower().startswith("normal "):
-                check = check[7:].strip()
-            if check:
-                forms_hit = bool(get_forms_db().resolve_name_to_forms(check))
-                name_hit  = bool(resolve_pokemon_name(check))
-                if not forms_hit and not name_hit:
-                    _invalid_names.append(check)
+            if check.lower().endswith(" only"): check = check[:-5].strip()
+            elif check.lower().startswith("normal "): check = check[7:].strip()
+            if check and not get_forms_db().resolve_name_to_forms(check) and not resolve_pokemon_name(check):
+                _invalid_names.append(check)
 
-        # Also validate the --evo value if provided
         if evo_val:
-            evo_check = evo_val.strip()
-            if evo_check:
-                forms_hit = bool(get_forms_db().resolve_name_to_forms(evo_check))
-                name_hit  = bool(resolve_pokemon_name(evo_check))
-                if not forms_hit and not name_hit:
-                    _invalid_names.append(evo_check)
+            _ec = evo_val.strip()
+            if _ec and not get_forms_db().resolve_name_to_forms(_ec) and not resolve_pokemon_name(_ec):
+                _invalid_names.append(_ec)
 
-        # Scan raw_no_names for unknown flags
+        for cname in compare_names:
+            _cc = cname.strip()
+            if _cc and not get_forms_db().resolve_name_to_forms(_cc) and not resolve_pokemon_name(_cc):
+                _invalid_names.append(_cc)
+
         _j = 0
         while _j < len(raw_no_names):
             _tok = raw_no_names[_j]
             if _tok.startswith("-"):
-                if (
-                    not is_flag(_tok)
-                    and not is_category_shortcut(_tok)
-                    and _tok not in _EXTRACTED_FLAGS
-                ):
+                if not is_flag(_tok) and not is_category_shortcut(_tok) and _tok not in _EXTRACTED_FLAGS:
                     _unknown_flags.append(_tok)
                 _canon = resolve_flag(_tok)
                 _info  = FLAG_DEFINITIONS.get(_canon, {}) if _canon else {}
@@ -1122,15 +1106,6 @@ class Graph(commands.Cog):
                         _j += 1
             else:
                 _j += 1
-
-        # Also validate --compare names for invalid Pokémon
-        for cname in compare_names:
-            check = cname.strip()
-            if check:
-                forms_hit = bool(get_forms_db().resolve_name_to_forms(check))
-                name_hit  = bool(resolve_pokemon_name(check))
-                if not forms_hit and not name_hit:
-                    _invalid_names.append(check)
 
         if _invalid_names or _unknown_flags:
             _lines: list[str] = []
@@ -1527,7 +1502,7 @@ class Graph(commands.Cog):
             _first_mquery, _, _      = build_query(_first_mraw, expand_name_by_dex=True)
 
             try:
-                buf, outliers = build_graph(
+                buf, outliers, _fetched_count = build_graph(
                     _merged_records, _first_mquery, display_str,
                     alltime=use_alltime,
                     show_outliers=use_outliers,
@@ -1548,11 +1523,13 @@ class Graph(commands.Cog):
             disc_tag        = _DISCORD_TAG[variant]
             accent          = config.SHINY_EMBED_COLOR if variant == "shiny" else config.EMBED_COLOR
             heading         = f"## {disc_tag} {multi_name} — Price History".strip()
+            _plotted_count  = total  # after subsampling inside build_graph
+            _cap_note       = " (capped)" if _was_capped else ""
             alltime_badge   = "  •  🕐 All-time" if use_alltime else ""
             since_badge     = f"  •  📅 Since {since_dt.strftime('%b %Y')}" if since_dt else ""
             before_badge    = f"  •  📅 Before {before_dt.strftime('%b %Y')}" if before_dt else ""
             outliers_badge  = "  •  ⚠️ Raw data (all outliers included)" if use_outliers else ""
-            sub             = f"_{total:,} auction(s) plotted  •  {len(_found_names)} Pokémon{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
+            sub             = f"_{_fetched_count:,} fetched{_cap_note}  •  {_plotted_count:,} plotted  •  {len(_found_names)} Pokémon{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
             file            = discord.File(buf, filename="graph.png")
 
             _has_outliers   = len(outliers) > 0
@@ -1574,7 +1551,7 @@ class Graph(commands.Cog):
                     await interaction.followup.send("❌ No data found.", ephemeral=True)
                     return
                 try:
-                    new_buf, new_outlier_data = build_graph(
+                    new_buf, new_outlier_data, _new_fetched = build_graph(
                         new_recs, _first_mquery, display_str,
                         alltime=new_alltime,
                         show_outliers=new_outliers,
@@ -1587,7 +1564,7 @@ class Graph(commands.Cog):
                 new_ob_bytes      = build_outlier_image(new_outlier_data, multi_name, variant) if new_outlier_data else None
                 new_alltime_b     = "  •  🕐 All-time" if new_alltime else ""
                 new_outliers_b    = "  •  ⚠️ Raw data (all outliers included)" if new_outliers else ""
-                new_sub           = f"_{len(new_recs):,} auction(s) plotted  •  {len(_found_names)} Pokémon{new_alltime_b}{since_badge}{before_badge}{new_outliers_b}  •  filters: `{display_str}`_"
+                new_sub           = f"_{_new_fetched:,} fetched  •  {len(new_recs):,} plotted  •  {len(_found_names)} Pokémon{new_alltime_b}{since_badge}{before_badge}{new_outliers_b}  •  filters: `{display_str}`_"
                 new_btn_list      = _build_btn_list(
                     legend_text=_legend_text,
                     filters_text=_filters_body,
@@ -1724,7 +1701,7 @@ class Graph(commands.Cog):
                 _requested_name = f"{n_unique} Pokémon"
 
         try:
-            buf, outliers = build_graph(
+            buf, outliers, _fetched_count = build_graph(
                 records, query, display_str,
                 alltime=use_alltime,
                 show_outliers=use_outliers,
@@ -1746,14 +1723,14 @@ class Graph(commands.Cog):
         disc_tag  = _DISCORD_TAG[variant]
         accent    = config.SHINY_EMBED_COLOR if variant == "shiny" else config.EMBED_COLOR
 
-        heading    = f"## {disc_tag} {name} — Price History".strip()
-        limit_note = f"  •  last {limit:,} auctions" if limit is not None else ""
-        cap_badge       = f"  •  ⚠️ capped at {MAX_FETCH:,}" if _was_capped else ""
+        heading         = f"## {disc_tag} {name} — Price History".strip()
+        _plotted_count  = total  # len(records) after subsampling inside build_graph
+        _cap_note       = " (capped)" if _was_capped else ""
         alltime_badge   = "  •  🕐 All-time" if use_alltime else ""
         since_badge     = f"  •  📅 Since {since_dt.strftime('%b %Y')}" if since_dt else ""
         before_badge    = f"  •  📅 Before {before_dt.strftime('%b %Y')}" if before_dt else ""
         outliers_badge  = "  •  ⚠️ Raw data (all outliers included)" if use_outliers else ""
-        sub        = f"_{total:,} auction(s) plotted{limit_note}{cap_badge}{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
+        sub        = f"_{_fetched_count:,} fetched{_cap_note}  •  {_plotted_count:,} plotted{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
 
         file = discord.File(buf, filename="graph.png")
 
@@ -1785,16 +1762,15 @@ class Graph(commands.Cog):
             await interaction.response.defer()
 
             new_ts = _build_ts_filter(new_alltime, _since_cap, _before_cap)
-            # Re-use _fetch so the MAX_FETCH cap applies on toggle too
             _regen_q = {**_query_cap, "ts": new_ts}
-            new_records, _ = _fetch(_regen_q, _limit_cap)
+            new_records, _regen_capped = _fetch(_regen_q, _limit_cap)
 
             if not new_records:
                 await interaction.followup.send("❌ No data found.", ephemeral=True)
                 return
 
             try:
-                new_buf, new_out = build_graph(
+                new_buf, new_out, _new_fetched = build_graph(
                     new_records, _query_cap, _display_cap,
                     alltime=new_alltime,
                     show_outliers=new_outliers,
@@ -1813,9 +1789,9 @@ class Graph(commands.Cog):
             since_badge_n   = f"  •  📅 Since {_since_cap.strftime('%b %Y')}" if _since_cap else ""
             before_badge_n  = f"  •  📅 Before {_before_cap.strftime('%b %Y')}" if _before_cap else ""
             out_badge_n     = "  •  ⚠️ Raw data" if new_outliers else ""
-            lim_note_n      = f"  •  last {_limit_cap:,} auctions" if _limit_cap is not None else ""
+            _regen_cap_note = " (capped)" if _regen_capped else ""
             new_sub         = (
-                f"_{len(new_records):,} auction(s) plotted{lim_note_n}"
+                f"_{_new_fetched:,} fetched{_regen_cap_note}  •  {len(new_records):,} plotted"
                 f"{alltime_badge_n}{since_badge_n}{before_badge_n}{out_badge_n}  •  filters: `{_display_cap}`_"
             )
 
@@ -1899,7 +1875,7 @@ class Graph(commands.Cog):
             mention_author=False,
         )
 
-        # ── Free large objects from memory now that the response is sent ──
+        # ── Free large objects from memory now that the response is sent ──────
         records.clear()
         outliers.clear()
         buf.close()
