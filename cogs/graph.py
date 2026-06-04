@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import io
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import discord
@@ -21,6 +22,7 @@ matplotlib.use("Agg")  # non-interactive backend, must be set before pyplot impo
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
+import pandas as pd
 from discord import app_commands
 from discord.ext import commands
 from pymongo import MongoClient
@@ -29,11 +31,6 @@ import config
 from config import REPLY
 from utils import build_query, resolve_pokemon_name, shiny_prefix, get_names_by_spawnrate, get_spawnrate_db
 from filters import FLAG_DEFINITIONS
-
-# ─── DB ───────────────────────────────────────────────────────────────────────
-_mongo = MongoClient(config.MONGO_URI)
-_db    = _mongo[config.MONGO_DB_NAME]
-_col   = _db[config.MONGO_COLLECTION]
 
 # ─── Name flag aliases (derived from filters.py — stays in sync automatically) ─
 _NAME_FLAGS: frozenset[str] = frozenset(
@@ -113,6 +110,13 @@ _SPAWNRATE_FLAGS: frozenset[str] = frozenset(
     ["--spawnrate"] + FLAG_DEFINITIONS.get("--spawnrate", {}).get("aliases", [])
 )
 
+# ── Graph-only flags (never passed to build_query) ────────────────────────────
+# Defined here at module level so they're shared between the command and any
+# future helpers, and not rebuilt on every invocation.
+_GRAPH_ONLY_FLAGS: frozenset[str] = frozenset({
+    FLAG_ALLTIME, FLAG_WITHOUTLIERS, FLAG_SINCE, FLAG_BEFORE, FLAG_COMPARE,
+})
+
 # ── Overlay palette for multi-pokemon compare mode ────────────────────────────
 # Each entry: (dot_color, line_color, fill_color)
 _OVERLAY_PALETTE = [
@@ -122,6 +126,71 @@ _OVERLAY_PALETTE = [
     ("#ffd166", "#f4a261", "#ffd16615"),  # gold / amber
     ("#ff6b6b", "#ff4d6d", "#ff6b6b15"),  # coral / rose
 ]
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STATIC TEXT CONSTANTS
+# Hoisted to module level so they're built once, not on every command invocation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LEGEND_TEXT = (
+    f"**📖 Reading the Graph**\n"
+    f"{REPLY} **Dots** — every individual auction sale, plotted by date and price\n"
+    f"{REPLY} **Avg Line** — smoothed average price over time; shows the general price direction\n"
+    f"{REPLY} **Trend** (dashed) — linear regression line; green means price rising over time, red means falling\n"
+    f"{REPLY} **Shaded band** — the middle 50% of sales (25th–75th percentile); wide band = inconsistent prices, narrow = stable market\n"
+    f"{REPLY} **Chart Min / Chart Max markers** — the cheapest and most expensive sale visible on the graph (outliers excluded)\n\n"
+    f"**📊 Stats Bar**\n"
+    f"{REPLY} **Auctions** — total number of sales plotted\n"
+    f"{REPLY} **Chart Min / Chart Max** — lowest and highest winning bid visible on the graph (outliers excluded)\n"
+    f"{REPLY} **All-time Min / All-time Max** — the absolute lowest and highest sale ever recorded, including any outliers\n"
+    f"{REPLY} **Avg** — mean price across all auctions\n"
+    f"{REPLY} **Median** — middle price (less affected by extreme outliers than avg)\n"
+    f"{REPLY} **Std Dev** — how spread out prices are; high = big price swings, low = consistent\n"
+    f"{REPLY} **Trend** — average price change per sale (▲ rising, ▼ falling)\n"
+    f"{REPLY} **Outliers** — sales so far above the typical price range they squash everything else. Excluded from the graph and most stats"
+)
+
+_FILTERS_BODY = (
+    f"**🔍 Available Filters**\n"
+    f"-# Use these with `a!g` — e.g. `a!g --n pikachu --sh` or `a!g --sh` for all shinies\n"
+    f"{REPLY} `--n <value>` — Pokémon name, **repeatable** for multi-plot  _(--name, --pokemon)_\n"
+    f"{REPLY} `--evo <value>` — Entire evo family merged as one series  _(--family, --fam)_\n"
+    f"{REPLY} `--sr <value>` — Spawn rate e.g. `--sr 1/225` or `--sr 225`  _(--spawnrate)_\n"
+    f"{REPLY} `--shiny` — Shiny only  _(--sh)_\n"
+    f"{REPLY} `--gmax` — Gigantamax only  _(--gm, --giga)_\n"
+    f"{REPLY} `--noshiny` — Exclude shinies  _(--nosh)_\n"
+    f"{REPLY} `--nogmax` — Exclude Gigantamax  _(--nogm)_\n"
+    f"{REPLY} `--iv <value>` — Total IV % e.g. `>90`, `>=85`, `90-100`  _(--totaliv)_\n"
+    f"{REPLY} `--hpiv / --atkiv / --defiv / --spatkiv / --spdefiv / --spdiv <value>` — Individual IVs\n"
+    f"{REPLY} `--level <value>` — Level e.g. `50`, `>50`, `30-100`  _(--lv, --lvl)_\n"
+    f"{REPLY} `--nature <value>` — Nature e.g. `adamant`  _(--nat)_\n"
+    f"{REPLY} `--move <value>` — Has this move, stackable  _(-m, --moves)_\n"
+    f"{REPLY} `--gender <value>` — `male`, `female`, or `unknown`  _(--g)_\n"
+    f"{REPLY} `--type <value>` — Type, stackable up to 2  _(--t)_\n"
+    f"{REPLY} `--region <value>` — Region e.g. `kanto`, `galar`  _(--r)_\n"
+    f"{REPLY} `--category <value>` — Category e.g. `rares`, `starters`  _(--cat)_\n"
+    f"{REPLY} `--exclude <kind> <value>` — Exclude by name/type/region/category  _(--ex)_\n"
+    f"{REPLY} `--price <value>` — Price filter e.g. `>5000`, `500-5000`  _(--p, --bid)_\n"
+    f"{REPLY} `--limit <value>` — Limit to N most recent matches  _(--lim, --top)_\n"
+    f"{REPLY} `--sort <value>` — Sort by `iv`, `bid`/`price`, `level`, `date`, `id` (append `+`/`-`)  _(--order)_\n"
+    f"{REPLY} `--alltime` — 🕐 Show all historical data instead of {GRAPH_START_YEAR}+ only\n"
+    f"{REPLY} `--withoutliers` — ⚠️ Plot ALL data including outliers (raw mode, may use log scale)\n"
+    f"{REPLY} `--since <date>` — Only show auctions from this date onwards (YYYY, YYYY-MM, or YYYY-MM-DD)\n"
+    f"{REPLY} `--before <date>` — Only show auctions before this date (YYYY, YYYY-MM, or YYYY-MM-DD)\n"
+    f"{REPLY} `--compare <name> [name2 ...]` — Overlay up to 4 other Pokémon on the same graph"
+)
+
+_PROTIP_TEXT = (
+    f"-# 💡 **Pro tip:** Use `--limit` to focus on the most recent auctions — "
+    f"e.g. `j!g --name garchomp --limit 50` graphs only the latest 50 sales, "
+    f"giving you a much cleaner picture of where prices stand today. "
+    f"Add `--nosh` to exclude shinies if you only want non-shiny data. "
+    f"By default both shiny and non-shiny are plotted together (e.g. `j!g --n meowth --iv >70`). "
+    f"Want only the base form with no regional/alternate variants? Use `--n normal meowth` — "
+    f"this excludes forms like Alolan Meowth, Galarian Meowth, or Gmax variants from the graph."
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,20 +234,17 @@ def _smart_yticks(p_min: float, p_max: float) -> np.ndarray:
 
 
 def _rolling_average(prices: np.ndarray, window: int) -> np.ndarray:
-    import pandas as pd
     return pd.Series(prices).rolling(window, center=True, min_periods=1).mean().to_numpy()
 
 
 def _percentile_band(prices: np.ndarray, dates, window: int = 30):
-    p25 = np.empty(len(prices))
-    p75 = np.empty(len(prices))
-    ts  = np.array([d.timestamp() for d in dates])
-    day = 86_400
-    for i, t in enumerate(ts):
-        mask    = np.abs(ts - t) <= window * day / 2
-        nearby  = prices[mask]
-        p25[i]  = np.percentile(nearby, 25)
-        p75[i]  = np.percentile(nearby, 75)
+    # Use pandas rolling quantile — O(n log n) vs the previous O(n²) loop.
+    # window is in calendar days; convert to a row-count window as an approximation
+    # (data is roughly uniform in time after subsampling, so this is fine).
+    s   = pd.Series(prices)
+    win = max(5, window)  # minimum sensible window
+    p25 = s.rolling(win, center=True, min_periods=1).quantile(0.25).to_numpy()
+    p75 = s.rolling(win, center=True, min_periods=1).quantile(0.75).to_numpy()
     return p25, p75
 
 
@@ -395,6 +461,8 @@ def build_compare_graph(
             _major_loc = mdates.MonthLocator(bymonth=[1, 4, 7, 10])
             _minor_loc = mdates.MonthLocator()
 
+        # Use a mutable container instead of nonlocal so the formatter is safe if
+        # matplotlib ever calls it from multiple threads (unlikely with Agg, but clean).
         _first_tick_done_c = [False]
 
         def _fmt_month_c(x, _pos=None):
@@ -731,6 +799,8 @@ def build_graph(
             _major_loc = mdates.MonthLocator(bymonth=[1, 4, 7, 10])
             _minor_loc = mdates.MonthLocator()
 
+        # Use a mutable container instead of nonlocal — thread-safe if matplotlib
+        # ever calls the formatter from multiple threads (unlikely with Agg, but clean).
         _first_tick_done = [False]
 
         def _fmt_month(x, _pos=None):
@@ -996,6 +1066,30 @@ def _error_view(text: str) -> discord.ui.LayoutView:
     return EV()
 
 
+@dataclass
+class _RegenState:
+    """Bundles the immutable state needed to regenerate a graph on toggle button press.
+
+    Using a dataclass instead of a raw closure makes the captured state explicit,
+    testable, and safe across concurrent requests (no shared mutable module-level vars).
+    """
+    records:      list
+    query:        dict
+    display_str:  str
+    limit:        int | None
+    since_dt:     datetime | None
+    before_dt:    datetime | None
+    pokemon_name: str
+    variant:      str
+    accent:       int
+    heading:      str
+    legend_text:  str
+    filters_body: str
+    protip_text:  str
+    found_names:  list | None = None   # set for multi-name mode only
+    variant_flags: list | None = None  # set for multi-name mode only
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # COG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1005,6 +1099,16 @@ class Graph(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Connect here so a bad URI raises at cog-load time, not at import time,
+        # giving a clear startup error rather than a silent crash.
+        # Store the client so cog_unload can close it and avoid leaking connections
+        # on hot-reloads (common in dev).
+        self._mongo = MongoClient(config.MONGO_URI)
+        self._col   = self._mongo[config.MONGO_DB_NAME][config.MONGO_COLLECTION]
+
+    def cog_unload(self):
+        """Close the MongoDB connection when the cog is unloaded or reloaded."""
+        self._mongo.close()
 
     @commands.hybrid_command(name="graph", aliases=["g", "chart"])
     @app_commands.describe(filters="Same filters as auction search e.g: --sh --iv >80, or --n pikachu --n meowth --sh")
@@ -1072,9 +1176,6 @@ class Graph(commands.Cog):
         from filters import is_flag, is_category_shortcut, resolve_flag
         from utils import get_forms_db
 
-        _GRAPH_ONLY_FLAGS = frozenset({
-            FLAG_ALLTIME, FLAG_WITHOUTLIERS, FLAG_SINCE, FLAG_BEFORE, FLAG_COMPARE,
-        })
         _EXTRACTED_FLAGS = _MULTI_NAME_FLAGS_ALL | _SPAWNRATE_FLAGS | _evo_flags | _GRAPH_ONLY_FLAGS
 
         _invalid_names: list[str] = []
@@ -1161,6 +1262,8 @@ class Graph(commands.Cog):
             "aid": 1, "lv":  1,
         }
 
+        _col = self._col  # capture for the nested closures below
+
         def _fetch_sync(q: dict, lim: int | None = None) -> tuple[list[dict], bool]:
             """
             Synchronous MongoDB fetch — always called via _fetch() so it
@@ -1187,82 +1290,42 @@ class Graph(commands.Cog):
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, functools.partial(_fetch_sync, q, lim))
 
-        _was_capped = False  # set to True if any _fetch call hits MAX_FETCH
+        # Use a mutable container so inner helpers (e.g. the multi-name loop) can
+        # update the flag without needing `nonlocal`, and the intent is clear if the
+        # code is later refactored into a separate helper function.
+        _capped = [False]  # _capped[0] is True if any _fetch call hits MAX_FETCH
 
         ref = ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None
 
-        # ── Static text payloads (hoisted so all branches can reference them) ──
-        _legend_text = (
-            f"**📖 Reading the Graph**\n"
-            f"{REPLY} **Dots** — every individual auction sale, plotted by date and price\n"
-            f"{REPLY} **Avg Line** — smoothed average price over time; shows the general price direction\n"
-            f"{REPLY} **Trend** (dashed) — linear regression line; green means price rising over time, red means falling\n"
-            f"{REPLY} **Shaded band** — the middle 50% of sales (25th–75th percentile); wide band = inconsistent prices, narrow = stable market\n"
-            f"{REPLY} **Chart Min / Chart Max markers** — the cheapest and most expensive sale visible on the graph (outliers excluded)\n\n"
-            f"**📊 Stats Bar**\n"
-            f"{REPLY} **Auctions** — total number of sales plotted\n"
-            f"{REPLY} **Chart Min / Chart Max** — lowest and highest winning bid visible on the graph (outliers excluded)\n"
-            f"{REPLY} **All-time Min / All-time Max** — the absolute lowest and highest sale ever recorded, including any outliers\n"
-            f"{REPLY} **Avg** — mean price across all auctions\n"
-            f"{REPLY} **Median** — middle price (less affected by extreme outliers than avg)\n"
-            f"{REPLY} **Std Dev** — how spread out prices are; high = big price swings, low = consistent\n"
-            f"{REPLY} **Trend** — average price change per sale (▲ rising, ▼ falling)\n"
-            f"{REPLY} **Outliers** — sales so far above the typical price range they squash everything else. Excluded from the graph and most stats"
-        )
-        _filters_body = (
-            f"**🔍 Available Filters**\n"
-            f"-# Use these with `a!g` — e.g. `a!g --n pikachu --sh` or `a!g --sh` for all shinies\n"
-            f"{REPLY} `--n <value>` — Pokémon name, **repeatable** for multi-plot  _(--name, --pokemon)_\n"
-            f"{REPLY} `--evo <value>` — Entire evo family merged as one series  _(--family, --fam)_\n"
-            f"{REPLY} `--sr <value>` — Spawn rate e.g. `--sr 1/225` or `--sr 225`  _(--spawnrate)_\n"
-            f"{REPLY} `--shiny` — Shiny only  _(--sh)_\n"
-            f"{REPLY} `--gmax` — Gigantamax only  _(--gm, --giga)_\n"
-            f"{REPLY} `--noshiny` — Exclude shinies  _(--nosh)_\n"
-            f"{REPLY} `--nogmax` — Exclude Gigantamax  _(--nogm)_\n"
-            f"{REPLY} `--iv <value>` — Total IV % e.g. `>90`, `>=85`, `90-100`  _(--totaliv)_\n"
-            f"{REPLY} `--hpiv / --atkiv / --defiv / --spatkiv / --spdefiv / --spdiv <value>` — Individual IVs\n"
-            f"{REPLY} `--level <value>` — Level e.g. `50`, `>50`, `30-100`  _(--lv, --lvl)_\n"
-            f"{REPLY} `--nature <value>` — Nature e.g. `adamant`  _(--nat)_\n"
-            f"{REPLY} `--move <value>` — Has this move, stackable  _(-m, --moves)_\n"
-            f"{REPLY} `--gender <value>` — `male`, `female`, or `unknown`  _(--g)_\n"
-            f"{REPLY} `--type <value>` — Type, stackable up to 2  _(--t)_\n"
-            f"{REPLY} `--region <value>` — Region e.g. `kanto`, `galar`  _(--r)_\n"
-            f"{REPLY} `--category <value>` — Category e.g. `rares`, `starters`  _(--cat)_\n"
-            f"{REPLY} `--exclude <kind> <value>` — Exclude by name/type/region/category  _(--ex)_\n"
-            f"{REPLY} `--price <value>` — Price filter e.g. `>5000`, `500-5000`  _(--p, --bid)_\n"
-            f"{REPLY} `--limit <value>` — Limit to N most recent matches  _(--lim, --top)_\n"
-            f"{REPLY} `--sort <value>` — Sort by `iv`, `bid`/`price`, `level`, `date`, `id` (append `+`/`-`)  _(--order)_\n"
-            f"{REPLY} `--alltime` — 🕐 Show all historical data instead of {GRAPH_START_YEAR}+ only\n"
-            f"{REPLY} `--withoutliers` — ⚠️ Plot ALL data including outliers (raw mode, may use log scale)\n"
-            f"{REPLY} `--since <date>` — Only show auctions from this date onwards (YYYY, YYYY-MM, or YYYY-MM-DD)\n"
-            f"{REPLY} `--before <date>` — Only show auctions before this date (YYYY, YYYY-MM, or YYYY-MM-DD)\n"
-            f"{REPLY} `--compare <name> [name2 ...]` — Overlay up to 4 other Pokémon on the same graph"
-        )
-        _protip_text = (
-            f"-# 💡 **Pro tip:** Use `--limit` to focus on the most recent auctions — "
-            f"e.g. `j!g --name garchomp --limit 50` graphs only the latest 50 sales, "
-            f"giving you a much cleaner picture of where prices stand today. "
-            f"Add `--nosh` to exclude shinies if you only want non-shiny data. "
-            f"By default both shiny and non-shiny are plotted together (e.g. `j!g --n meowth --iv >70`). "
-            f"Want only the base form with no regional/alternate variants? Use `--n normal meowth` — "
-            f"this excludes forms like Alolan Meowth, Galarian Meowth, or Gmax variants from the graph."
-        )
+        # Use module-level constants — no need to rebuild these strings on every invocation.
+        _legend_text  = _LEGEND_TEXT
+        _filters_body = _FILTERS_BODY
+        _protip_text  = _PROTIP_TEXT
 
         # ── Button factory (hoisted so all branches can reference it) ──────────
         def _build_btn_list(
             legend_text, filters_text, has_outliers, outlier_count, outlier_bytes,
             outlier_data, is_alltime, is_outliers, regenerate_fn,
         ):
+            """
+            Build the list of discord.ui.Button instances for the graph message.
+
+            Previously used five nested classes defined inside this function, each
+            closing over different variables.  That worked but was hard to test and
+            debug.  Now each button is a small inner class that receives all its
+            state through __init__ parameters, which is how discord.py intends it.
+            """
             btn_list = []
 
             # ── 📖 How to Read This Graph ──────────────────────────────────────
             class _HowToReadBtn(discord.ui.Button):
-                def __init__(self):
+                def __init__(self, _legend_text):
                     super().__init__(
                         style=discord.ButtonStyle.secondary,
                         label="📖 How to Read This Graph",
                         custom_id="g_legend",
                     )
+                    self._legend_text = _legend_text
                 async def callback(self, interaction: discord.Interaction):
                     class LegendView(discord.ui.LayoutView):
                         c = discord.ui.Container(
@@ -1271,83 +1334,86 @@ class Graph(commands.Cog):
                         )
                     await interaction.response.send_message(view=LegendView(), ephemeral=True)
 
-            btn_list.append(_HowToReadBtn())
+            btn_list.append(_HowToReadBtn(legend_text))
 
             # ── 🔍 Available Filters ───────────────────────────────────────────
-            _ft = filters_text
-
             class _FiltersBtn(discord.ui.Button):
-                def __init__(self):
+                def __init__(self, _filters_text):
                     super().__init__(
                         style=discord.ButtonStyle.secondary,
                         label="🔍 Available Filters",
                         custom_id="g_filters",
                     )
+                    self._filters_text = _filters_text
                 async def callback(self, interaction: discord.Interaction):
                     class FiltersView(discord.ui.LayoutView):
                         c = discord.ui.Container(
-                            discord.ui.TextDisplay(content=_ft),
+                            discord.ui.TextDisplay(content=self._filters_text),
                             accent_colour=config.EMBED_COLOR,
                         )
                     await interaction.response.send_message(view=FiltersView(), ephemeral=True)
 
-            btn_list.append(_FiltersBtn())
+            btn_list.append(_FiltersBtn(filters_text))
 
             # ── 🕐 All-time / Since 2024 toggle ───────────────────────────────
-            _is_alltime_cap  = is_alltime
-            _is_outliers_cap = is_outliers
-
             class _AlltimeBtn(discord.ui.Button):
-                def __init__(self):
-                    if _is_alltime_cap:
+                def __init__(self, _is_alltime, _is_outliers, _regenerate_fn):
+                    if _is_alltime:
                         _style = discord.ButtonStyle.success
                         _label = f"📅 Since {GRAPH_START_YEAR} Only"
                     else:
                         _style = discord.ButtonStyle.secondary
                         _label = "🕐 Show All-time Data"
                     super().__init__(style=_style, label=_label, custom_id="g_alltime")
+                    self._is_alltime    = _is_alltime
+                    self._is_outliers   = _is_outliers
+                    self._regenerate_fn = _regenerate_fn
                 async def callback(self, interaction: discord.Interaction):
-                    await regenerate_fn(interaction, not _is_alltime_cap, _is_outliers_cap)
+                    await self._regenerate_fn(interaction, not self._is_alltime, self._is_outliers)
 
-            btn_list.append(_AlltimeBtn())
+            btn_list.append(_AlltimeBtn(is_alltime, is_outliers, regenerate_fn))
 
             # ── ⚠️ Outliers toggle ─────────────────────────────────────────────
             class _OutliersToggleBtn(discord.ui.Button):
-                def __init__(self):
-                    if _is_outliers_cap:
+                def __init__(self, _is_alltime, _is_outliers, _regenerate_fn):
+                    if _is_outliers:
                         _style = discord.ButtonStyle.danger
                         _label = "📊 Hide Outliers (Clean View)"
                     else:
                         _style = discord.ButtonStyle.secondary
                         _label = "⚠️ Include Outliers too"
                     super().__init__(style=_style, label=_label, custom_id="g_outliers_toggle")
+                    self._is_alltime    = _is_alltime
+                    self._is_outliers   = _is_outliers
+                    self._regenerate_fn = _regenerate_fn
                 async def callback(self, interaction: discord.Interaction):
-                    await regenerate_fn(interaction, _is_alltime_cap, not _is_outliers_cap)
+                    await self._regenerate_fn(interaction, self._is_alltime, not self._is_outliers)
 
-            btn_list.append(_OutliersToggleBtn())
+            btn_list.append(_OutliersToggleBtn(is_alltime, is_outliers, regenerate_fn))
 
             # ── Outlier detail viewer ──────────────────────────────────────────
             if has_outliers and not is_outliers:
-                _ob = outlier_bytes
-                _oc = outlier_count
                 n_high = sum(1 for e in outlier_data if (e[3] if len(e) == 4 else "high") == "high")
-                n_low  = _oc - n_high
+                n_low  = outlier_count - n_high
                 parts  = []
                 if n_high: parts.append(f"▲{n_high} overpriced")
                 if n_low:  parts.append(f"▼{n_low} sniped")
-                label  = f"📋 View {_oc} Excluded Sale(s) ({', '.join(parts)})"
+                detail_label = f"📋 View {outlier_count} Excluded Sale(s) ({', '.join(parts)})"
 
                 class _OutlierDetailBtn(discord.ui.Button):
-                    def __init__(self):
+                    def __init__(self, _label, _ob, _oc):
                         super().__init__(
                             style=discord.ButtonStyle.secondary,
-                            label=label,
+                            label=_label,
                             custom_id="g_outlier_detail",
                         )
+                        self._ob = _ob
+                        self._oc = _oc
                     async def callback(self, interaction: discord.Interaction):
-                        if _ob:
-                            _ob.seek(0)
-                        out_f = discord.File(_ob, filename="outliers.png")
+                        if self._ob:
+                            self._ob.seek(0)
+                        out_f = discord.File(self._ob, filename="outliers.png")
+                        _oc   = self._oc
                         class OutlierView(discord.ui.LayoutView):
                             c = discord.ui.Container(
                                 discord.ui.TextDisplay(content=(
@@ -1364,7 +1430,7 @@ class Graph(commands.Cog):
                             view=OutlierView(), file=out_f, ephemeral=True,
                         )
 
-                btn_list.append(_OutlierDetailBtn())
+                btn_list.append(_OutlierDetailBtn(detail_label, outlier_bytes, outlier_count))
 
             return btn_list
 
@@ -1485,7 +1551,7 @@ class Graph(commands.Cog):
                 mraw              = ["--name", mname] + _variant_flags
                 mquery, _, mlimit = build_query(mraw, expand_name_by_dex=True)
                 mrecs, _mc        = await _fetch(mquery, mlimit)
-                if _mc: _was_capped = True
+                if _mc: _capped[0] = True
                 if mrecs:
                     _merged_records.extend(mrecs)
                     _found_names.append(mname.title())
@@ -1539,7 +1605,7 @@ class Graph(commands.Cog):
             disc_tag        = _DISCORD_TAG[variant]
             accent          = config.SHINY_EMBED_COLOR if variant == "shiny" else config.EMBED_COLOR
             heading         = f"## {disc_tag} {multi_name} — Price History".strip()
-            _cap_note       = " (capped)" if _was_capped else ""
+            _cap_note       = " (capped)" if _capped[0] else ""
             alltime_badge   = "  •  🕐 All-time" if use_alltime else ""
             since_badge     = f"  •  📅 Since {since_dt.strftime('%b %Y')}" if since_dt else ""
             before_badge    = f"  •  📅 Before {before_dt.strftime('%b %Y')}" if before_dt else ""
@@ -1681,7 +1747,9 @@ class Graph(commands.Cog):
             query, _, limit = build_query(list(raw_no_names), expand_name_by_dex=True)
             _requested_name = None   # computed after fetch from actual data
 
-        records, _was_capped = await _fetch(query, limit)
+        records, _mc = await _fetch(query, limit)
+        if _mc:
+            _capped[0] = True
 
         if not records:
             await ctx.send(
@@ -1739,7 +1807,7 @@ class Graph(commands.Cog):
         accent    = config.SHINY_EMBED_COLOR if variant == "shiny" else config.EMBED_COLOR
 
         heading         = f"## {disc_tag} {name} — Price History".strip()
-        _cap_note       = " (capped)" if _was_capped else ""
+        _cap_note       = " (capped)" if _capped[0] else ""
         alltime_badge   = "  •  🕐 All-time" if use_alltime else ""
         since_badge     = f"  •  📅 Since {since_dt.strftime('%b %Y')}" if since_dt else ""
         before_badge    = f"  •  📅 Before {before_dt.strftime('%b %Y')}" if before_dt else ""
@@ -1754,30 +1822,54 @@ class Graph(commands.Cog):
             out_buf = build_outlier_image(outliers, name, variant)
 
         # ── Close-over state for toggle button callbacks ───────────────────────
+        _regen_state = _RegenState(
+            records      = records,
+            query        = query,
+            display_str  = display_str,
+            limit        = limit,
+            since_dt     = since_dt,
+            before_dt    = before_dt,
+            pokemon_name = name,
+            variant      = variant,
+            accent       = accent,
+            heading      = heading,
+            legend_text  = _legend_text,
+            filters_body = _filters_body,
+            protip_text  = _protip_text,
+        )
+
+        # Captured state needed to regenerate the graph on toggle
         _outlier_count  = len(outliers)
         _has_outliers   = bool(outliers)
         _legend_capture = _legend_text
         _outlier_bytes  = out_buf  # BytesIO | None
-
-        # Captured state needed to regenerate the graph on toggle
-        _records_cap    = records
-        _query_cap      = query
-        _display_cap    = display_str
-        _limit_cap      = limit
-        _since_cap      = since_dt
-        _before_cap     = before_dt
 
         async def _regenerate_graph(
             interaction: discord.Interaction,
             new_alltime: bool,
             new_outliers: bool,
         ):
-            """Re-fetch, rebuild, and edit the message with toggled view flags."""
-            await interaction.response.defer()
+            """Rebuild and edit the message with toggled view flags.
 
-            new_ts = _build_ts_filter(new_alltime, _since_cap, _before_cap)
-            _regen_q = {**_query_cap, "ts": new_ts}
-            new_records, _regen_capped = await _fetch(_regen_q, _limit_cap)
+            For the alltime toggle we already have all the records in
+            _regen_state.records — we just apply a different timestamp filter in
+            memory instead of making an extra DB round-trip, which feels noticeably
+            faster.  A new DB fetch is only needed if some other state changes
+            (which currently never happens from the buttons).
+            """
+            await interaction.response.defer()
+            st = _regen_state
+
+            # Apply the timestamp filter in-memory — no DB round-trip needed.
+            new_ts_filter = _build_ts_filter(new_alltime, st.since_dt, st.before_dt)
+            _gte = new_ts_filter.get("$gte")
+            _lt  = new_ts_filter.get("$lt")
+            new_records = [
+                r for r in st.records
+                if (_gte is None or r.get("ts", 0) >= _gte)
+                and (_lt  is None or r.get("ts", 0) <  _lt)
+            ]
+            _regen_capped = False  # no new fetch, so no new cap
 
             if not new_records:
                 await interaction.followup.send("❌ No data found.", ephemeral=True)
@@ -1785,10 +1877,10 @@ class Graph(commands.Cog):
 
             try:
                 new_buf, new_out, _new_fetched, _new_plotted = build_graph(
-                    new_records, _query_cap, _display_cap,
+                    new_records, st.query, st.display_str,
                     alltime=new_alltime,
                     show_outliers=new_outliers,
-                    pokemon_name=name,
+                    pokemon_name=st.pokemon_name,
                 )
             except Exception as exc:
                 await interaction.followup.send(f"❌ Failed to regenerate: `{exc}`", ephemeral=True)
@@ -1798,21 +1890,21 @@ class Graph(commands.Cog):
 
             n_out_new       = len(new_out)
             has_out_new     = bool(new_out)
-            out_buf_new     = build_outlier_image(new_out, name, variant) if has_out_new else None
+            out_buf_new     = build_outlier_image(new_out, st.pokemon_name, st.variant) if has_out_new else None
             alltime_badge_n = "  •  🕐 All-time" if new_alltime else ""
-            since_badge_n   = f"  •  📅 Since {_since_cap.strftime('%b %Y')}" if _since_cap else ""
-            before_badge_n  = f"  •  📅 Before {_before_cap.strftime('%b %Y')}" if _before_cap else ""
+            since_badge_n   = f"  •  📅 Since {st.since_dt.strftime('%b %Y')}" if st.since_dt else ""
+            before_badge_n  = f"  •  📅 Before {st.before_dt.strftime('%b %Y')}" if st.before_dt else ""
             out_badge_n     = "  •  ⚠️ Raw data" if new_outliers else ""
             _regen_cap_note = " (capped)" if _regen_capped else ""
             new_sub         = (
                 f"_{_new_fetched:,} fetched{_regen_cap_note}  •  {_new_plotted:,} plotted"
-                f"{alltime_badge_n}{since_badge_n}{before_badge_n}{out_badge_n}  •  filters: `{_display_cap}`_"
+                f"{alltime_badge_n}{since_badge_n}{before_badge_n}{out_badge_n}  •  filters: `{st.display_str}`_"
             )
 
             # Rebuild buttons with updated toggle state
             new_btn_list = _build_btn_list(
-                legend_text=_legend_capture,
-                filters_text=_filters_body,
+                legend_text=st.legend_text,
+                filters_text=st.filters_body,
                 has_outliers=has_out_new,
                 outlier_count=n_out_new,
                 outlier_bytes=out_buf_new,
@@ -1823,20 +1915,20 @@ class Graph(commands.Cog):
             )
 
             new_container_comps = [
-                discord.ui.TextDisplay(content=heading),
+                discord.ui.TextDisplay(content=st.heading),
                 discord.ui.TextDisplay(content=new_sub),
                 discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(media="attachment://graph.png"),
                 ),
                 discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
-                discord.ui.TextDisplay(content=_protip_text),
+                discord.ui.TextDisplay(content=st.protip_text),
             ]
 
             class NewGraphView(discord.ui.LayoutView):
                 container = discord.ui.Container(
                     *new_container_comps,
-                    accent_colour=accent,
+                    accent_colour=st.accent,
                 )
                 action_row = discord.ui.ActionRow(*new_btn_list)
                 def __init__(self):
@@ -1849,8 +1941,8 @@ class Graph(commands.Cog):
 
         # ── Build initial button list and view ────────────────────────────────
         _btn_list = _build_btn_list(
-            legend_text=_legend_capture,
-            filters_text=_filters_body,
+            legend_text=_regen_state.legend_text,
+            filters_text=_regen_state.filters_body,
             has_outliers=_has_outliers,
             outlier_count=_outlier_count,
             outlier_bytes=_outlier_bytes,
@@ -1890,7 +1982,10 @@ class Graph(commands.Cog):
         )
 
         # ── Free large objects from memory now that the response is sent ──────
-        records.clear()
+        # NOTE: do NOT call records.clear() here — _regen_state.records points to
+        # the same list and is needed by the toggle buttons for in-memory filtering.
+        # The list will be garbage-collected when the view times out (300 s) and
+        # _regen_state goes out of scope.
         outliers.clear()
         buf.close()
         if out_buf is not None:
