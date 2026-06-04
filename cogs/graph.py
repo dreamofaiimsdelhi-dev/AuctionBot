@@ -1054,6 +1054,96 @@ class Graph(commands.Cog):
         # raw_no_names now has only modifier flags (--sh, --gmax, --iv, etc.)
         # We use these as the "variant/filter" tokens for every pokemon query.
 
+        # ── Combined validation: invalid Pokémon names + unknown flags ─────────
+        # Names come from multi_names (already extracted above).
+        # Unknown flags are checked against raw_no_names (remaining tokens after
+        # name/evo/sr extraction) plus the graph-only flags already consumed.
+        # We collect ALL errors before sending anything.
+        from filters import is_flag, is_category_shortcut, resolve_flag
+        from utils import get_forms_db
+
+        # Graph-only flags already stripped from raw; define them so we don't
+        # flag them as unknown when scanning the original token list.
+        _GRAPH_ONLY_FLAGS = frozenset({
+            FLAG_ALLTIME, FLAG_WITHOUTLIERS, FLAG_SINCE, FLAG_BEFORE, FLAG_COMPARE,
+        })
+        # Also cover --evo / --sr aliases (already extracted; shouldn't be flagged)
+        _EXTRACTED_FLAGS = (
+            _MULTI_NAME_FLAGS_ALL
+            | _SPAWNRATE_FLAGS
+            | _evo_flags
+            | _GRAPH_ONLY_FLAGS
+        )
+
+        _invalid_names: list[str] = []
+        _unknown_flags: list[str] = []
+
+        # Validate every name supplied via --n / --name
+        for mname in multi_names:
+            check = mname
+            if check.lower().endswith(" only"):
+                check = check[:-5].strip()
+            elif check.lower().startswith("normal "):
+                check = check[7:].strip()
+            if check:
+                forms_hit = bool(get_forms_db().resolve_name_to_forms(check))
+                name_hit  = bool(resolve_pokemon_name(check))
+                if not forms_hit and not name_hit:
+                    _invalid_names.append(check)
+
+        # Also validate the --evo value if provided
+        if evo_val:
+            evo_check = evo_val.strip()
+            if evo_check:
+                forms_hit = bool(get_forms_db().resolve_name_to_forms(evo_check))
+                name_hit  = bool(resolve_pokemon_name(evo_check))
+                if not forms_hit and not name_hit:
+                    _invalid_names.append(evo_check)
+
+        # Scan raw_no_names for unknown flags (--flags that aren't recognised)
+        _j = 0
+        while _j < len(raw_no_names):
+            _tok = raw_no_names[_j]
+            if _tok.startswith("-"):
+                if (
+                    not is_flag(_tok)
+                    and not is_category_shortcut(_tok)
+                    and _tok not in _EXTRACTED_FLAGS
+                ):
+                    _unknown_flags.append(_tok)
+                # Advance past value tokens for known flags
+                _canon = resolve_flag(_tok)
+                _info  = FLAG_DEFINITIONS.get(_canon, {}) if _canon else {}
+                _j += 1
+                if _info.get("takes_arg"):
+                    while _j < len(raw_no_names) and not raw_no_names[_j].startswith("-"):
+                        _j += 1
+            else:
+                _j += 1
+
+        # Also scan --compare names for invalid Pokémon
+        for cname in compare_names:
+            check = cname.strip()
+            if check:
+                forms_hit = bool(get_forms_db().resolve_name_to_forms(check))
+                name_hit  = bool(resolve_pokemon_name(check))
+                if not forms_hit and not name_hit:
+                    _invalid_names.append(check)
+
+        if _invalid_names or _unknown_flags:
+            _lines: list[str] = []
+            for bad in _invalid_names:
+                _lines.append(f"❌ **{bad}** is not a valid Pokémon name.")
+            for uf in _unknown_flags:
+                _lines.append(f"❌ Unknown filter: `{uf}`")
+            _lines.append(f"{REPLY} Check your spelling or use `a!a h` to see all available filters.")
+            await ctx.send(
+                view=_error_view("\n".join(_lines)),
+                reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
+                mention_author=False,
+            )
+            return
+
         # ── Determine display string (for subtitle) ────────────────────────────
         display_str = filters.strip() or "All auctions"
 
