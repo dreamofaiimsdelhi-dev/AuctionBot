@@ -25,7 +25,7 @@ from pymongo import MongoClient
 
 import config
 from config import REPLY
-from utils import build_query, resolve_pokemon_name, shiny_prefix
+from utils import build_query, resolve_pokemon_name, shiny_prefix, get_names_by_spawnrate, get_spawnrate_db
 from filters import FLAG_DEFINITIONS
 
 # ─── DB ───────────────────────────────────────────────────────────────────────
@@ -96,6 +96,17 @@ FLAG_SINCE        = "--since"         # --since 2024-06-01 or --since 2023
 FLAG_BEFORE       = "--before"        # --before 2025-01-01 or --before 2025
 FLAG_COMPARE      = "--compare"       # --compare pokemon2 [pokemon3 ...]
 
+# Multi-name flags: --n meowth --n zorua  (repeatable; each is one pokemon)
+# These are ALL aliases of --name as registered in FLAG_DEFINITIONS
+_MULTI_NAME_FLAGS_ALL: frozenset[str] = frozenset(
+    ["--name"] + FLAG_DEFINITIONS["--name"].get("aliases", [])
+)
+
+# Spawnrate flag aliases (for graph-level pre-extraction)
+_SPAWNRATE_FLAGS: frozenset[str] = frozenset(
+    ["--spawnrate"] + FLAG_DEFINITIONS.get("--spawnrate", {}).get("aliases", [])
+)
+
 # ── Overlay palette for multi-pokemon compare mode ────────────────────────────
 # Each entry: (dot_color, line_color, fill_color)
 _OVERLAY_PALETTE = [
@@ -148,10 +159,8 @@ def _smart_yticks(p_min: float, p_max: float) -> np.ndarray:
 
 
 def _rolling_average(prices: np.ndarray, window: int) -> np.ndarray:
-    if len(prices) < window:
-        return prices.copy()
-    kernel = np.ones(window) / window
-    return np.convolve(prices, kernel, mode="same")
+    import pandas as pd
+    return pd.Series(prices).rolling(window, center=True, min_periods=1).mean().to_numpy()
 
 
 def _percentile_band(prices: np.ndarray, dates, window: int = 30):
@@ -222,6 +231,52 @@ def _extract_flag_values(tokens: list[str], flag: str) -> tuple[list[str], list[
     joined = " ".join(raw_values)
     values = [v.strip() for v in joined.split(",") if v.strip()]
     return values, remaining
+
+
+def _extract_repeatable_flag_values(
+    tokens: list[str], flag_set: frozenset[str]
+) -> tuple[list[str], list[str]]:
+    """
+    Extract ALL occurrences of any flag in flag_set (e.g. all --name / --n aliases).
+    Each occurrence contributes exactly one value (the next non-flag token(s) until
+    the following flag).
+    Returns (list_of_names, remaining_tokens_without_those_flags_and_values).
+
+    e.g. tokens = ["--n", "meowth", "--n", "iron", "valiant", "--sh"]
+         → names = ["meowth", "iron valiant"],  remaining = ["--sh"]
+    """
+    names: list[str]     = []
+    out:   list[str]     = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.lower() in flag_set:
+            # Consume value tokens until next flag
+            i += 1
+            parts: list[str] = []
+            while i < len(tokens) and not tokens[i].startswith("-"):
+                parts.append(tokens[i])
+                i += 1
+            name = " ".join(parts).strip()
+            if name:
+                names.append(name)
+        else:
+            out.append(tok)
+            i += 1
+    return names, out
+
+
+def _extract_flag_value_multi_alias(
+    tokens: list[str], flag_set: frozenset[str]
+) -> tuple[str | None, list[str]]:
+    """
+    Like _extract_flag_value but matches any token in flag_set (e.g. all --sr aliases).
+    Returns the first match's value and the remaining tokens.
+    """
+    for flag in flag_set:
+        if flag in tokens:
+            return _extract_flag_value(tokens, flag)
+    return None, tokens
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,6 +522,12 @@ def build_graph(
     (which can be a form name like 'Snowman Pikachu' even when the user asked for 'pikachu').
     """
     records = sorted(records, key=lambda r: r.get("ts", 0))
+
+    # ── Capture true all-time min/max from the FULL dataset BEFORE subsampling ──
+    # Subsampling with a step can silently skip the highest/lowest bid record.
+    _all_prices_full = np.array([r["bid"] for r in records], dtype=float)
+    _at_min_true     = float(_all_prices_full.min()) if len(_all_prices_full) else 0.0
+    _at_max_true     = float(_all_prices_full.max()) if len(_all_prices_full) else 0.0
 
     if len(records) > MAX_POINTS:
         step    = len(records) // MAX_POINTS
@@ -715,10 +776,18 @@ def build_graph(
     ax.yaxis.label.set_color(TEXT_COLOR)
 
     tag        = pal["tag"]
-    # Use the requested name if provided; fall back to DB pn only as a last resort.
-    # This prevents form names (e.g. "Snowman Pikachu") from appearing when the
-    # user explicitly asked for "pikachu".
-    name       = pokemon_name or records[0].get("pn", "Unknown")
+    # Use the requested name if provided; otherwise build a summary from unique species.
+    # Never fall back to records[0].pn — that would show a random Pokémon name.
+    if pokemon_name:
+        name = pokemon_name
+    else:
+        unique_pn = sorted({r.get("pn", "") for r in records if r.get("pn")})
+        if len(unique_pn) == 1:
+            name = unique_pn[0]
+        elif len(unique_pn) <= 4:
+            name = " / ".join(unique_pn)
+        else:
+            name = f"{len(unique_pn)} Pokémon"
     full_title = f"[{tag}] {name}".strip() if tag else name
     date_first = dates[0].strftime("%-d %b %Y")
     date_last  = dates[-1].strftime("%-d %b %Y")
@@ -759,8 +828,10 @@ def build_graph(
     S1    = 1.0
     col_w = (S1 - S0) / 7
 
-    at_min = prices.min()
-    at_max = prices.max()
+    # Use true all-time min/max captured before subsampling so large datasets
+    # (e.g. 550M max) are never silently dropped by the step-sample.
+    at_min = _at_min_true
+    at_max = _at_max_true
 
     paired_cols = [
         ("Chart Min",    _format_price(p_min),  "Chart Max",    _format_price(p_max)),
@@ -922,36 +993,23 @@ class Graph(commands.Cog):
         self.bot = bot
 
     @commands.hybrid_command(name="graph", aliases=["g", "chart"])
-    @app_commands.describe(filters="Same filters as auction search e.g: --name pikachu --shiny --iv >80")
+    @app_commands.describe(filters="Same filters as auction search e.g: --sh --iv >80, or --n pikachu --n meowth --sh")
     async def graph_command(self, ctx: commands.Context, *, filters: str = ""):
         """
-        Show a price history graph for a Pokémon.
+        Show a price history graph for Pokémon auctions.
 
-        Uses the same filters as `j!a s`.
+        No name needed — defaults to ALL Pokémon matching your filters.
+
         Examples:
-          j!g --name pikachu --shiny
-          j!g --name charizard --gmax
-          j!g --name mewtwo --iv >90
-          j!g --name goomy --limit 10
-          j!g --name garchomp --since 2024-06-01
-          j!g --name garchomp --before 2025
-          j!g --name pikachu --compare charizard mewtwo
+          a!g --sh                            → shiny graph for ALL Pokémon
+          a!g --n pikachu --sh               → shiny pikachu
+          a!g --n meowth --n zorua --n ralts --sh  → plot 3 shinies on one graph
+          a!g --evo pikachu --sh             → whole pikachu evo family merged as one line
+          a!g --sr 1/225 --sh                → shiny graph for all 1/225 spawn-rate mons
+          a!g --sr 225                       → all mons with 1/225 spawn rate
+          a!g --n garchomp --since 2024-06-01
+          a!g --compare mewtwo, iron valiant, brute bonnet --sh
         """
-        _raw_check = filters.split() if filters else []
-        _has_name_flag    = any(t in _NAME_FLAGS for t in _raw_check)
-        _has_compare_flag = FLAG_COMPARE in _raw_check
-        if not _has_name_flag and not _has_compare_flag:
-            await ctx.send(
-                view=_error_view(
-                    f"❌ Please specify a Pokémon name.\n"
-                    f"{REPLY} Example: `j!g --name pikachu --shiny`\n"
-                    f"{REPLY} Example: `j!g --compare mewtwo, iron valiant, brute bonnet --sh`"
-                ),
-                reference=ctx.message,
-                mention_author=False,
-            )
-            return
-
         raw = filters.split() if filters else []
 
         # ── Extract graph-only flags before passing to build_query ─────────────
@@ -981,51 +1039,30 @@ class Graph(commands.Cog):
             )
             return
 
-        query, _, limit  = build_query(raw, expand_name_by_dex=True)
-        display_str      = " ".join(raw).strip()
+        # ── Extract multi-name flags (--n / --name, repeatable) ───────────────
+        # e.g. --n meowth --n zorua --n ralts  → ["meowth", "zorua", "ralts"]
+        # After extraction, raw no longer contains --n flags.
+        multi_names, raw_no_names = _extract_repeatable_flag_values(raw, _MULTI_NAME_FLAGS_ALL)
 
-        # ── Capture the requested Pokémon name exactly as the user typed it ───
-        # This ensures graph titles show "Pikachu" not "Snowman Pikachu" or
-        # any other DB form name that happens to match the dex expansion.
-        def _requested_name_from_tokens(tokens: list[str]) -> str | None:
-            for flag in _NAME_FLAGS:
-                if flag in tokens:
-                    idx = tokens.index(flag)
-                    # Collect all value tokens until the next flag
-                    parts = []
-                    j = idx + 1
-                    while j < len(tokens) and not tokens[j].startswith("-"):
-                        parts.append(tokens[j])
-                        j += 1
-                    name_val = " ".join(parts).strip()
-                    # Strip "only" suffix / "normal" prefix so chart title is clean
-                    if name_val.lower().endswith(" only"):
-                        name_val = name_val[:-5].strip()
-                    elif name_val.lower().startswith("normal "):
-                        name_val = name_val[7:].strip()
-                    return name_val.title() if name_val else None
-            return None
+        # ── Extract --sr / --spawnrate value ──────────────────────────────────
+        sr_val, raw_no_names = _extract_flag_value_multi_alias(raw_no_names, _SPAWNRATE_FLAGS)
 
-        _requested_name = _requested_name_from_tokens(raw)
+        # ── Extract --evo value from the remaining tokens ─────────────────────
+        _evo_flags = frozenset(["--evo"] + FLAG_DEFINITIONS.get("--evo", {}).get("aliases", []))
+        evo_val, raw_no_names = _extract_flag_value_multi_alias(raw_no_names, _evo_flags)
 
-        # Only pull fields we actually need (short names)
-        projection = {
-            "ts":  1,   # unix_timestamp
-            "bid": 1,   # winning_bid
-            "pn":  1,   # pokemon_name
-            "sh":  1,   # shiny
-            "gx":  1,   # gmax
-            "iv":  1,   # total_iv_percent
-            "aid": 1,   # auction_id  — needed for outlier table
-            "lv":  1,   # level       — needed for outlier table
-        }
+        # raw_no_names now has only modifier flags (--sh, --gmax, --iv, etc.)
+        # We use these as the "variant/filter" tokens for every pokemon query.
+
+        # ── Determine display string (for subtitle) ────────────────────────────
+        display_str = filters.strip() or "All auctions"
 
         if hasattr(ctx, "interaction") and ctx.interaction:
             await ctx.defer()
         else:
             await ctx.typing()
 
-        # ── Build the timestamp filter (alltime / since / before / default) ───
+        # ── Build timestamp filter ─────────────────────────────────────────────
         def _build_ts_filter(use_alltime: bool, since_dt, before_dt) -> dict:
             ts_f: dict = {"$exists": True}
             conditions = []
@@ -1037,7 +1074,6 @@ class Graph(commands.Cog):
             if before_dt:
                 conditions.append({"ts": {"$lt": int(before_dt.timestamp())}})
             if conditions:
-                # Merge all $gte / $lt into one ts expression
                 merged: dict = {"$exists": True}
                 for c in conditions:
                     merged.update(c.get("ts", {}))
@@ -1047,52 +1083,232 @@ class Graph(commands.Cog):
         ts_filter = _build_ts_filter(use_alltime, since_dt, before_dt)
 
         # ── Helper: fetch records for one query dict ───────────────────────────
-        def _fetch(q: dict) -> list[dict]:
+        projection = {
+            "ts":  1, "bid": 1, "pn":  1,
+            "sh":  1, "gx":  1, "iv":  1,
+            "aid": 1, "lv":  1,
+        }
+
+        def _fetch(q: dict, lim: int | None = None) -> list[dict]:
             cur = _col.find(
                 {**q, "ts": ts_filter, "bid": {"$exists": True}},
                 projection,
             ).sort("ts", -1)
-            if limit is not None:
-                cur = cur.limit(limit)
+            if lim is not None:
+                cur = cur.limit(lim)
             recs = list(cur)
             recs.sort(key=lambda r: r.get("ts", 0))
             return recs
 
+        ref = ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None
+
+        # ── Static text payloads (hoisted so all branches can reference them) ──
+        _legend_text = (
+            f"**📖 Reading the Graph**\n"
+            f"{REPLY} **Dots** — every individual auction sale, plotted by date and price\n"
+            f"{REPLY} **Avg Line** — smoothed average price over time; shows the general price direction\n"
+            f"{REPLY} **Trend** (dashed) — linear regression line; green means price rising over time, red means falling\n"
+            f"{REPLY} **Shaded band** — the middle 50% of sales (25th–75th percentile); wide band = inconsistent prices, narrow = stable market\n"
+            f"{REPLY} **Chart Min / Chart Max markers** — the cheapest and most expensive sale visible on the graph (outliers excluded)\n\n"
+            f"**📊 Stats Bar**\n"
+            f"{REPLY} **Auctions** — total number of sales plotted\n"
+            f"{REPLY} **Chart Min / Chart Max** — lowest and highest winning bid visible on the graph (outliers excluded)\n"
+            f"{REPLY} **All-time Min / All-time Max** — the absolute lowest and highest sale ever recorded, including any outliers\n"
+            f"{REPLY} **Avg** — mean price across all auctions\n"
+            f"{REPLY} **Median** — middle price (less affected by extreme outliers than avg)\n"
+            f"{REPLY} **Std Dev** — how spread out prices are; high = big price swings, low = consistent\n"
+            f"{REPLY} **Trend** — average price change per sale (▲ rising, ▼ falling)\n"
+            f"{REPLY} **Outliers** — sales so far above the typical price range they squash everything else. Excluded from the graph and most stats"
+        )
+        _filters_body = (
+            f"**🔍 Available Filters**\n"
+            f"-# Use these with `a!g` — e.g. `a!g --n pikachu --sh` or `a!g --sh` for all shinies\n"
+            f"{REPLY} `--n <value>` — Pokémon name, **repeatable** for multi-plot  _(--name, --pokemon)_\n"
+            f"{REPLY} `--evo <value>` — Entire evo family merged as one series  _(--family, --fam)_\n"
+            f"{REPLY} `--sr <value>` — Spawn rate e.g. `--sr 1/225` or `--sr 225`  _(--spawnrate)_\n"
+            f"{REPLY} `--shiny` — Shiny only  _(--sh)_\n"
+            f"{REPLY} `--gmax` — Gigantamax only  _(--gm, --giga)_\n"
+            f"{REPLY} `--noshiny` — Exclude shinies  _(--nosh)_\n"
+            f"{REPLY} `--nogmax` — Exclude Gigantamax  _(--nogm)_\n"
+            f"{REPLY} `--iv <value>` — Total IV % e.g. `>90`, `>=85`, `90-100`  _(--totaliv)_\n"
+            f"{REPLY} `--hpiv / --atkiv / --defiv / --spatkiv / --spdefiv / --spdiv <value>` — Individual IVs\n"
+            f"{REPLY} `--level <value>` — Level e.g. `50`, `>50`, `30-100`  _(--lv, --lvl)_\n"
+            f"{REPLY} `--nature <value>` — Nature e.g. `adamant`  _(--nat)_\n"
+            f"{REPLY} `--move <value>` — Has this move, stackable  _(-m, --moves)_\n"
+            f"{REPLY} `--gender <value>` — `male`, `female`, or `unknown`  _(--g)_\n"
+            f"{REPLY} `--type <value>` — Type, stackable up to 2  _(--t)_\n"
+            f"{REPLY} `--region <value>` — Region e.g. `kanto`, `galar`  _(--r)_\n"
+            f"{REPLY} `--category <value>` — Category e.g. `rares`, `starters`  _(--cat)_\n"
+            f"{REPLY} `--exclude <kind> <value>` — Exclude by name/type/region/category  _(--ex)_\n"
+            f"{REPLY} `--price <value>` — Price filter e.g. `>5000`, `500-5000`  _(--p, --bid)_\n"
+            f"{REPLY} `--limit <value>` — Limit to N most recent matches  _(--lim, --top)_\n"
+            f"{REPLY} `--sort <value>` — Sort by `iv`, `bid`/`price`, `level`, `date`, `id` (append `+`/`-`)  _(--order)_\n"
+            f"{REPLY} `--alltime` — 🕐 Show all historical data instead of {GRAPH_START_YEAR}+ only\n"
+            f"{REPLY} `--withoutliers` — ⚠️ Plot ALL data including outliers (raw mode, may use log scale)\n"
+            f"{REPLY} `--since <date>` — Only show auctions from this date onwards (YYYY, YYYY-MM, or YYYY-MM-DD)\n"
+            f"{REPLY} `--before <date>` — Only show auctions before this date (YYYY, YYYY-MM, or YYYY-MM-DD)\n"
+            f"{REPLY} `--compare <name> [name2 ...]` — Overlay up to 4 other Pokémon on the same graph"
+        )
+        _protip_text = (
+            f"-# 💡 **Pro tip:** Use `--limit` to focus on the most recent auctions — "
+            f"e.g. `j!g --name garchomp --limit 50` graphs only the latest 50 sales, "
+            f"giving you a much cleaner picture of where prices stand today. "
+            f"Add `--nosh` to exclude shinies if you only want non-shiny data. "
+            f"By default both shiny and non-shiny are plotted together (e.g. `j!g --n meowth --iv >70`). "
+            f"Want only the base form with no regional/alternate variants? Use `--n normal meowth` — "
+            f"this excludes forms like Alolan Meowth, Galarian Meowth, or Gmax variants from the graph."
+        )
+
+        # ── Button factory (hoisted so all branches can reference it) ──────────
+        def _build_btn_list(
+            legend_text, filters_text, has_outliers, outlier_count, outlier_bytes,
+            outlier_data, is_alltime, is_outliers, regenerate_fn,
+        ):
+            btn_list = []
+
+            # ── 📖 How to Read This Graph ──────────────────────────────────────
+            class _HowToReadBtn(discord.ui.Button):
+                def __init__(self):
+                    super().__init__(
+                        style=discord.ButtonStyle.secondary,
+                        label="📖 How to Read This Graph",
+                        custom_id="g_legend",
+                    )
+                async def callback(self, interaction: discord.Interaction):
+                    class LegendView(discord.ui.LayoutView):
+                        c = discord.ui.Container(
+                            discord.ui.TextDisplay(content=legend_text),
+                            accent_colour=config.EMBED_COLOR,
+                        )
+                    await interaction.response.send_message(view=LegendView(), ephemeral=True)
+
+            btn_list.append(_HowToReadBtn())
+
+            # ── 🔍 Available Filters ───────────────────────────────────────────
+            _ft = filters_text
+
+            class _FiltersBtn(discord.ui.Button):
+                def __init__(self):
+                    super().__init__(
+                        style=discord.ButtonStyle.secondary,
+                        label="🔍 Available Filters",
+                        custom_id="g_filters",
+                    )
+                async def callback(self, interaction: discord.Interaction):
+                    class FiltersView(discord.ui.LayoutView):
+                        c = discord.ui.Container(
+                            discord.ui.TextDisplay(content=_ft),
+                            accent_colour=config.EMBED_COLOR,
+                        )
+                    await interaction.response.send_message(view=FiltersView(), ephemeral=True)
+
+            btn_list.append(_FiltersBtn())
+
+            # ── 🕐 All-time / Since 2024 toggle ───────────────────────────────
+            _is_alltime_cap  = is_alltime
+            _is_outliers_cap = is_outliers
+
+            class _AlltimeBtn(discord.ui.Button):
+                def __init__(self):
+                    if _is_alltime_cap:
+                        _style = discord.ButtonStyle.success
+                        _label = f"📅 Since {GRAPH_START_YEAR} Only"
+                    else:
+                        _style = discord.ButtonStyle.secondary
+                        _label = "🕐 Show All-time Data"
+                    super().__init__(style=_style, label=_label, custom_id="g_alltime")
+                async def callback(self, interaction: discord.Interaction):
+                    await regenerate_fn(interaction, not _is_alltime_cap, _is_outliers_cap)
+
+            btn_list.append(_AlltimeBtn())
+
+            # ── ⚠️ Outliers toggle ─────────────────────────────────────────────
+            class _OutliersToggleBtn(discord.ui.Button):
+                def __init__(self):
+                    if _is_outliers_cap:
+                        _style = discord.ButtonStyle.danger
+                        _label = "📊 Hide Outliers (Clean View)"
+                    else:
+                        _style = discord.ButtonStyle.secondary
+                        _label = "⚠️ Include Outliers too"
+                    super().__init__(style=_style, label=_label, custom_id="g_outliers_toggle")
+                async def callback(self, interaction: discord.Interaction):
+                    await regenerate_fn(interaction, _is_alltime_cap, not _is_outliers_cap)
+
+            btn_list.append(_OutliersToggleBtn())
+
+            # ── Outlier detail viewer ──────────────────────────────────────────
+            if has_outliers and not is_outliers:
+                _ob = outlier_bytes
+                _oc = outlier_count
+                n_high = sum(1 for e in outlier_data if (e[3] if len(e) == 4 else "high") == "high")
+                n_low  = _oc - n_high
+                parts  = []
+                if n_high: parts.append(f"▲{n_high} overpriced")
+                if n_low:  parts.append(f"▼{n_low} sniped")
+                label  = f"📋 View {_oc} Excluded Sale(s) ({', '.join(parts)})"
+
+                class _OutlierDetailBtn(discord.ui.Button):
+                    def __init__(self):
+                        super().__init__(
+                            style=discord.ButtonStyle.secondary,
+                            label=label,
+                            custom_id="g_outlier_detail",
+                        )
+                    async def callback(self, interaction: discord.Interaction):
+                        if _ob:
+                            _ob.seek(0)
+                        out_f = discord.File(_ob, filename="outliers.png")
+                        class OutlierView(discord.ui.LayoutView):
+                            c = discord.ui.Container(
+                                discord.ui.TextDisplay(content=(
+                                    f"📋 **{_oc} sale(s) excluded from the graph**\n"
+                                    f"_▲ Overpriced outliers inflate the average; ▼ sniped/underpriced sales compress the Y-axis. Both are hidden by default for a cleaner chart._"
+                                )),
+                                discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+                                discord.ui.MediaGallery(
+                                    discord.MediaGalleryItem(media="attachment://outliers.png"),
+                                ),
+                                accent_colour=discord.Colour(0xef476f),
+                            )
+                        await interaction.response.send_message(
+                            view=OutlierView(), file=out_f, ephemeral=True,
+                        )
+
+                btn_list.append(_OutlierDetailBtn())
+
+            return btn_list
+
         # ── COMPARE MODE ──────────────────────────────────────────────────────
         if compare_names:
-            # Support two syntaxes:
-            #   (A) j!g --name mewtwo --compare iron valiant, brute bonnet --sh
-            #       → primary = mewtwo (from --name), compare list = [iron valiant, brute bonnet]
-            #   (B) j!g --compare mewtwo, iron valiant, brute bonnet --sh
-            #       → primary = mewtwo (first in list), compare list = rest
-            # In syntax (B) there is no --name flag, so we promote compare_names[0] to primary.
-            _no_name_flag = not any(t in _NAME_FLAGS for t in raw)
+            _no_name_flag = not multi_names
             if _no_name_flag:
                 if len(compare_names) < 2:
                     await ctx.send(
                         view=_error_view(
                             "❌ `--compare` needs at least 2 Pokémon names.\n"
-                            f"{REPLY} Example: `j!g --compare mewtwo, iron valiant, brute bonnet --sh`"
+                            f"{REPLY} Example: `a!g --compare mewtwo, iron valiant, brute bonnet --sh`"
                         ),
-                        reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
-                        mention_author=False,
+                        reference=ref, mention_author=False,
                     )
                     return
-                # Treat first name as primary, rest as compare targets.
-                # Forward any variant flags (--sh, --shiny, --gmax) so the
-                # primary query is filtered correctly (e.g. shiny-only).
-                _primary_cname  = compare_names[0]
-                compare_names   = compare_names[1:]
-                _variant_flags  = [t for t in raw if t in ("--sh", "--shiny", "--gmax", "--noshiny")]
-                praw = ["--name", _primary_cname] + _variant_flags
+                _primary_cname = compare_names[0]
+                compare_names  = compare_names[1:]
+                _variant_flags = [t for t in raw_no_names if t in ("--sh", "--shiny", "--gmax", "--noshiny")]
+                praw   = ["--name", _primary_cname] + _variant_flags
                 query, _, limit = build_query(praw, expand_name_by_dex=True)
                 _requested_name = _primary_cname.title()
+            else:
+                _variant_flags  = [t for t in raw_no_names if t in ("--sh", "--shiny", "--gmax", "--noshiny")]
+                praw = ["--name", multi_names[0]] + _variant_flags
+                query, _, limit = build_query(praw, expand_name_by_dex=True)
+                _requested_name = multi_names[0].title()
+                compare_names = (multi_names[1:] if len(multi_names) > 1 else []) + compare_names
 
             if len(compare_names) > 4:
                 await ctx.send(
                     view=_error_view("❌ Maximum 4 Pokémon in compare mode (5 total including primary)."),
-                    reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
-                    mention_author=False,
+                    reference=ref, mention_author=False,
                 )
                 return
 
@@ -1100,8 +1316,7 @@ class Graph(commands.Cog):
             if not primary_records:
                 await ctx.send(
                     view=_error_view("❌ No auctions found for the primary Pokémon."),
-                    reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
-                    mention_author=False,
+                    reference=ref, mention_author=False,
                 )
                 return
 
@@ -1110,27 +1325,22 @@ class Graph(commands.Cog):
             series = [{"name": primary_name, "records": primary_records, "variant": primary_variant}]
 
             for cname in compare_names:
-                # Forward variant flags (--sh/--shiny/--gmax) to each compared pokemon
-                # so "j!g --compare mewtwo, iron valiant --sh" queries all as shiny.
-                _variant_flags = [t for t in raw if t in ("--sh", "--shiny", "--gmax", "--noshiny")]
+                _variant_flags = [t for t in raw_no_names if t in ("--sh", "--shiny", "--gmax", "--noshiny")]
                 craw = ["--name", cname] + _variant_flags
                 cquery, _, _ = build_query(craw, expand_name_by_dex=True)
                 crecs = _fetch(cquery)
                 if not crecs:
                     await ctx.send(
                         view=_error_view(f"❌ No auctions found for `{cname}` — skipping."),
-                        reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
-                        mention_author=False,
+                        reference=ref, mention_author=False,
                     )
                     continue
-                cname_real = cname.title()  # use the name as requested, not the DB form name
-                series.append({"name": cname_real, "records": crecs, "variant": primary_variant})
+                series.append({"name": cname.title(), "records": crecs, "variant": primary_variant})
 
             if len(series) < 2:
                 await ctx.send(
                     view=_error_view("❌ Need at least 2 Pokémon with data to compare."),
-                    reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
-                    mention_author=False,
+                    reference=ref, mention_author=False,
                 )
                 return
 
@@ -1145,8 +1355,7 @@ class Graph(commands.Cog):
             except Exception as e:
                 await ctx.send(
                     view=_error_view(f"❌ Failed to generate comparison graph: `{e}`"),
-                    reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
-                    mention_author=False,
+                    reference=ref, mention_author=False,
                 )
                 return
 
@@ -1159,7 +1368,6 @@ class Graph(commands.Cog):
             sub = f"_Comparing {len(series)} Pokémon{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
 
             file = discord.File(buf, filename="graph.png")
-            ref  = ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None
 
             class CompareView(discord.ui.LayoutView):
                 container = discord.ui.Container(
@@ -1177,8 +1385,210 @@ class Graph(commands.Cog):
             await ctx.send(view=CompareView(), file=file, reference=ref, mention_author=False)
             return
 
-        # ── SINGLE POKEMON MODE ───────────────────────────────────────────────
-        records = _fetch(query)
+        # ── MULTI-NAME MODE  (--n meowth --n zorua --n ralts) ─────────────────
+        # Fetch all named pokemon and merge into ONE pool → single build_graph call.
+        # This is NOT compare mode. Use --compare for separate overlaid series.
+        if len(multi_names) > 1:
+            _variant_flags = list(raw_no_names)
+            _merged_records: list[dict] = []
+            _found_names:    list[str]  = []
+            for mname in multi_names:
+                mraw              = ["--name", mname] + _variant_flags
+                mquery, _, mlimit = build_query(mraw, expand_name_by_dex=True)
+                mrecs             = _fetch(mquery, mlimit)
+                if mrecs:
+                    _merged_records.extend(mrecs)
+                    _found_names.append(mname.title())
+
+            if not _merged_records:
+                await ctx.send(
+                    view=_error_view("❌ No auctions found for any of the specified Pokémon."),
+                    reference=ref, mention_author=False,
+                )
+                return
+
+            if len(_merged_records) < 3:
+                await ctx.send(
+                    view=_error_view(
+                        f"❌ Only **{len(_merged_records)}** auction(s) found across all specified Pokémon — need at least 3.\n"
+                        f"{REPLY} Try broadening your filters."
+                    ),
+                    reference=ref, mention_author=False,
+                )
+                return
+
+            # Build a display name: list up to 4 names, then "+ N more"
+            if len(_found_names) <= 4:
+                _multi_display_name = " / ".join(_found_names)
+            else:
+                _multi_display_name = f"{', '.join(_found_names[:4])} + {len(_found_names) - 4} more"
+
+            # Use the variant/query from the first successful name for palette detection
+            _first_mraw              = ["--name", multi_names[0]] + _variant_flags
+            _first_mquery, _, _      = build_query(_first_mraw, expand_name_by_dex=True)
+
+            try:
+                buf, outliers = build_graph(
+                    _merged_records, _first_mquery, display_str,
+                    alltime=use_alltime,
+                    show_outliers=use_outliers,
+                    pokemon_name=_multi_display_name,
+                )
+            except Exception as e:
+                await ctx.send(
+                    view=_error_view(f"❌ Failed to generate graph: `{e}`"),
+                    reference=ref, mention_author=False,
+                )
+                return
+
+            # Re-use the standard single-graph response path from here
+            multi_name      = _multi_display_name
+            total           = len(_merged_records)
+            variant         = _detect_variant(_first_mquery)
+            pal             = _PALETTE[variant]
+            disc_tag        = _DISCORD_TAG[variant]
+            accent          = config.SHINY_EMBED_COLOR if variant == "shiny" else config.EMBED_COLOR
+            heading         = f"## {disc_tag} {multi_name} — Price History".strip()
+            alltime_badge   = "  •  🕐 All-time" if use_alltime else ""
+            since_badge     = f"  •  📅 Since {since_dt.strftime('%b %Y')}" if since_dt else ""
+            before_badge    = f"  •  📅 Before {before_dt.strftime('%b %Y')}" if before_dt else ""
+            outliers_badge  = "  •  ⚠️ Raw data (all outliers included)" if use_outliers else ""
+            sub             = f"_{total:,} auction(s) plotted  •  {len(_found_names)} Pokémon{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
+            file            = discord.File(buf, filename="graph.png")
+
+            _has_outliers   = len(outliers) > 0
+            _outlier_count  = len(outliers)
+            _outlier_bytes  = build_outlier_image(outliers, multi_name, variant) if outliers else None
+            _legend_capture = _legend_text  # defined below — forward ref safe at runtime
+
+            async def _regenerate_graph_multi(interaction: discord.Interaction, new_alltime: bool, new_outliers: bool):
+                await interaction.response.defer()
+                new_ts    = _build_ts_filter(new_alltime, since_dt, before_dt)
+                new_recs: list[dict] = []
+                for mname in multi_names:
+                    mraw2             = ["--name", mname] + _variant_flags
+                    mq2, _, ml2       = build_query(mraw2, expand_name_by_dex=True)
+                    new_recs.extend(_fetch({**mq2, "ts": new_ts, "bid": {"$exists": True}}))
+                if not new_recs:
+                    await interaction.followup.send("❌ No data found.", ephemeral=True)
+                    return
+                try:
+                    new_buf, new_outlier_data = build_graph(
+                        new_recs, _first_mquery, display_str,
+                        alltime=new_alltime,
+                        show_outliers=new_outliers,
+                        pokemon_name=_multi_display_name,
+                    )
+                except Exception as exc:
+                    await interaction.followup.send(f"❌ `{exc}`", ephemeral=True)
+                    return
+                new_file          = discord.File(new_buf, filename="graph.png")
+                new_ob_bytes      = build_outlier_image(new_outlier_data, multi_name, variant) if new_outlier_data else None
+                new_alltime_b     = "  •  🕐 All-time" if new_alltime else ""
+                new_outliers_b    = "  •  ⚠️ Raw data (all outliers included)" if new_outliers else ""
+                new_sub           = f"_{len(new_recs):,} auction(s) plotted  •  {len(_found_names)} Pokémon{new_alltime_b}{since_badge}{before_badge}{new_outliers_b}  •  filters: `{display_str}`_"
+                new_btn_list      = _build_btn_list(
+                    legend_text=_legend_text,
+                    filters_text=_filters_body,
+                    has_outliers=bool(new_outlier_data),
+                    outlier_count=len(new_outlier_data),
+                    outlier_bytes=new_ob_bytes,
+                    outlier_data=new_outlier_data,
+                    is_alltime=new_alltime,
+                    is_outliers=new_outliers,
+                    regenerate_fn=_regenerate_graph_multi,
+                )
+                new_container_comps = [
+                    discord.ui.TextDisplay(content=heading),
+                    discord.ui.TextDisplay(content=new_sub),
+                    discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+                    discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://graph.png")),
+                    discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+                    discord.ui.TextDisplay(content=_protip_text),
+                ]
+                class _NewMultiView(discord.ui.LayoutView):
+                    container  = discord.ui.Container(*new_container_comps, accent_colour=accent)
+                    action_row = discord.ui.ActionRow(*new_btn_list)
+                    def __init__(self): super().__init__(timeout=300)
+                await interaction.edit_original_response(attachments=[new_file], view=_NewMultiView())
+
+            _btn_list_multi = _build_btn_list(
+                legend_text=_legend_text,
+                filters_text=_filters_body,
+                has_outliers=_has_outliers,
+                outlier_count=_outlier_count,
+                outlier_bytes=_outlier_bytes,
+                outlier_data=outliers,
+                is_alltime=use_alltime,
+                is_outliers=use_outliers,
+                regenerate_fn=_regenerate_graph_multi,
+            )
+
+            _container_comps_multi = [
+                discord.ui.TextDisplay(content=heading),
+                discord.ui.TextDisplay(content=sub),
+                discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://graph.png")),
+                discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+                discord.ui.TextDisplay(content=_protip_text),
+            ]
+
+            class MultiView(discord.ui.LayoutView):
+                container  = discord.ui.Container(*_container_comps_multi, accent_colour=accent)
+                action_row = discord.ui.ActionRow(*_btn_list_multi)
+                def __init__(self): super().__init__(timeout=300)
+
+            await ctx.send(view=MultiView(), file=file, reference=ref, mention_author=False)
+            return
+
+        # ── SINGLE / ALL MODE ─────────────────────────────────────────────────
+        # Determine the query.  Priority:
+        #   1. --evo <name>    → whole evo family merged into one series
+        #   2. --n <name>      → single named Pokémon (with form expansion)
+        #   3. --sr <rate>     → all Pokémon at that spawn rate
+        #   4. (nothing)       → all Pokémon matching modifier flags
+
+        _requested_name: str | None = None
+
+        if evo_val:
+            # Build query that includes the whole evo family
+            evo_tokens = ["--evo", evo_val] + list(raw_no_names)
+            query, _, limit = build_query(evo_tokens, expand_name_by_dex=True)
+            _requested_name = f"{evo_val.title()} family"
+
+        elif multi_names:
+            # Single name (len == 1, already handled multi above)
+            single_name = multi_names[0]
+            name_tokens = ["--name", single_name] + list(raw_no_names)
+            query, _, limit = build_query(name_tokens, expand_name_by_dex=True)
+            _requested_name = single_name.title()
+
+        elif sr_val:
+            # Spawn-rate filter: resolve names and intersect
+            sr_tokens = ["--spawnrate", sr_val] + list(raw_no_names)
+            query, _, limit = build_query(sr_tokens, expand_name_by_dex=True)
+            # Validate that we actually resolved any names
+            sr_names = get_names_by_spawnrate(sr_val)
+            if not sr_names:
+                db = get_spawnrate_db()
+                valid = ", ".join(f"1/{d}" for d in sorted(db.all_denominators())[:12])
+                await ctx.send(
+                    view=_error_view(
+                        f"❌ No Pokémon found for spawn rate `{sr_val}`.\n"
+                        f"{REPLY} Valid rates include: {valid} …\n"
+                        f"{REPLY} Try `--sr 225` or `--sr 1/225`."
+                    ),
+                    reference=ref, mention_author=False,
+                )
+                return
+            _requested_name = f"1/{sr_val.split('/')[-1]} spawn rate"
+
+        else:
+            # No name, no evo, no sr — all Pokémon (filtered by modifier flags only)
+            query, _, limit = build_query(list(raw_no_names), expand_name_by_dex=True)
+            _requested_name = None   # computed after fetch from actual data
+
+        records = _fetch(query, limit)
 
         if not records:
             await ctx.send(
@@ -1199,6 +1609,19 @@ class Graph(commands.Cog):
             )
             return
 
+        # ── Resolve the display name AFTER fetch so we know exactly what's in the data ──
+        # For named queries (_requested_name already set) just use it.
+        # For all-pokemon / broad queries, compute from unique species in results.
+        if _requested_name is None:
+            unique_pn = sorted({r.get("pn", "") for r in records if r.get("pn")})
+            n_unique  = len(unique_pn)
+            if n_unique == 1:
+                _requested_name = unique_pn[0]
+            elif n_unique <= 3:
+                _requested_name = " / ".join(unique_pn)
+            else:
+                _requested_name = f"{n_unique} Pokémon"
+
         try:
             buf, outliers = build_graph(
                 records, query, display_str,
@@ -1214,9 +1637,8 @@ class Graph(commands.Cog):
             )
             return
 
-        # Use the name the user actually asked for, not the DB's form name.
-        # e.g. "--n pikachu" shows "Pikachu" not "Snowman Pikachu".
-        name      = _requested_name or records[0].get("pn", "Unknown")
+        # _requested_name is always set by this point (either from flags or computed above).
+        name      = _requested_name
         total     = len(records)
         variant   = _detect_variant(query)
         pal       = _PALETTE[variant]
@@ -1232,64 +1654,6 @@ class Graph(commands.Cog):
         sub        = f"_{total:,} auction(s) plotted{limit_note}{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
 
         file = discord.File(buf, filename="graph.png")
-        ref  = ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None
-
-        # ── Static text payloads for button ephemeral replies ─────────────────
-        _legend_text = (
-            f"**📖 Reading the Graph**\n"
-            f"{REPLY} **Dots** — every individual auction sale, plotted by date and price\n"
-            f"{REPLY} **Avg Line** — smoothed average price over time; shows the general price direction\n"
-            f"{REPLY} **Trend** (dashed) — linear regression line; green means price rising over time, red means falling\n"
-            f"{REPLY} **Shaded band** — the middle 50% of sales (25th–75th percentile); wide band = inconsistent prices, narrow = stable market\n"
-            f"{REPLY} **Chart Min / Chart Max markers** — the cheapest and most expensive sale visible on the graph (outliers excluded)\n\n"
-            f"**📊 Stats Bar**\n"
-            f"{REPLY} **Auctions** — total number of sales plotted\n"
-            f"{REPLY} **Chart Min / Chart Max** — lowest and highest winning bid visible on the graph (outliers excluded)\n"
-            f"{REPLY} **All-time Min / All-time Max** — the absolute lowest and highest sale ever recorded, including any outliers\n"
-            f"{REPLY} **Avg** — mean price across all auctions\n"
-            f"{REPLY} **Median** — middle price (less affected by extreme outliers than avg)\n"
-            f"{REPLY} **Std Dev** — how spread out prices are; high = big price swings, low = consistent\n"
-            f"{REPLY} **Trend** — average price change per sale (▲ rising, ▼ falling)\n"
-            f"{REPLY} **Outliers** — sales so far above the typical price range they squash everything else. Excluded from the graph and most stats"
-        )
-
-        _filters_body = (
-            f"**🔍 Available Filters**\n"
-            f"-# Use these with `j!g` — e.g. `j!g --name pikachu --shiny --iv >90`\n"
-            f"{REPLY} `--name <value>` — Pokémon name  _(--n, -n, --pokemon)_\n"
-            f"{REPLY} `--shiny` — Shiny only  _(--sh)_\n"
-            f"{REPLY} `--gmax` — Gigantamax only  _(--gm, --giga)_\n"
-            f"{REPLY} `--noshiny` — Exclude shinies  _(--nosh)_\n"
-            f"{REPLY} `--nogmax` — Exclude Gigantamax  _(--nogm)_\n"
-            f"{REPLY} `--iv <value>` — Total IV % e.g. `>90`, `>=85`, `90-100`  _(--totaliv)_\n"
-            f"{REPLY} `--hpiv / --atkiv / --defiv / --spatkiv / --spdefiv / --spdiv <value>` — Individual IVs\n"
-            f"{REPLY} `--level <value>` — Level e.g. `50`, `>50`, `30-100`  _(--lv, --lvl)_\n"
-            f"{REPLY} `--nature <value>` — Nature e.g. `adamant`  _(--nat)_\n"
-            f"{REPLY} `--move <value>` — Has this move, stackable  _(-m, --moves)_\n"
-            f"{REPLY} `--gender <value>` — `male`, `female`, or `unknown`  _(--g)_\n"
-            f"{REPLY} `--type <value>` — Type, stackable up to 2  _(--t)_\n"
-            f"{REPLY} `--region <value>` — Region e.g. `kanto`, `galar`  _(--r)_\n"
-            f"{REPLY} `--evo <value>` — Entire evo family  _(--family)_\n"
-            f"{REPLY} `--category <value>` — Category e.g. `rares`, `starters`  _(--cat)_\n"
-            f"{REPLY} `--exclude <kind> <value>` — Exclude by name/type/region/category --ex type fire, --ex name alolan meowth, --ex category event/rare/regional/leg/my/ub/hisui/paldean/starters  _(--ex)_\n"
-            f"{REPLY} `--price <value>` — Price filter e.g. `>5000`, `500-5000`  _(--p, --bid)_\n"
-            f"{REPLY} `--limit <value>` — Limit to N most recent matches  _(--lim, --top)_\n"
-            f"{REPLY} `--sort <value>` — Sort by `iv`, `bid`, `level`, `date`, `id` (append `+`/`-`)  _(--order)_\n"
-            f"{REPLY} `--alltime` — 🕐 Show all historical data instead of {GRAPH_START_YEAR}+ only\n"
-            f"{REPLY} `--withoutliers` — ⚠️ Plot ALL data including outliers (raw mode, may use log scale)\n"
-            f"{REPLY} `--since <date>` — Only show auctions from this date onwards (YYYY, YYYY-MM, or YYYY-MM-DD)\n"
-            f"{REPLY} `--before <date>` — Only show auctions before this date (YYYY, YYYY-MM, or YYYY-MM-DD)\n"
-            f"{REPLY} `--compare <name> [name2 ...]` — Overlay up to 4 other Pokémon on the same graph"
-        )
-        _protip_text = (
-            f"-# 💡 **Pro tip:** Use `--limit` to focus on the most recent auctions — "
-            f"e.g. `j!g --name garchomp --limit 50` graphs only the latest 50 sales, "
-            f"giving you a much cleaner picture of where prices stand today. "
-            f"Add `--nosh` to exclude shinies if you only want non-shiny data. "
-            f"By default both shiny and non-shiny are plotted together (e.g. `j!g --n meowth --iv >70`). "
-            f"Want only the base form with no regional/alternate variants? Use `--n normal meowth` — "
-            f"this excludes forms like Alolan Meowth, Galarian Meowth, or Gmax variants from the graph."
-        )
 
         # ── Build outlier BytesIO if needed — used only by the button callback ─
         out_buf = None
@@ -1337,6 +1701,7 @@ class Graph(commands.Cog):
                     new_records, _query_cap, _display_cap,
                     alltime=new_alltime,
                     show_outliers=new_outliers,
+                    pokemon_name=name,
                 )
             except Exception as exc:
                 await interaction.followup.send(f"❌ Failed to regenerate: `{exc}`", ephemeral=True)
@@ -1394,130 +1759,6 @@ class Graph(commands.Cog):
                 attachments=[new_file],
                 view=NewGraphView(),
             )
-
-        # ── Button factory (used both for initial view and after toggles) ──────
-        def _build_btn_list(
-            legend_text, filters_text, has_outliers, outlier_count, outlier_bytes,
-            outlier_data, is_alltime, is_outliers, regenerate_fn,
-        ):
-            btn_list = []
-
-            # ── 📖 How to Read This Graph ──────────────────────────────────────
-            class _HowToReadBtn(discord.ui.Button):
-                def __init__(self):
-                    super().__init__(
-                        style=discord.ButtonStyle.secondary,
-                        label="📖 How to Read This Graph",
-                        custom_id="g_legend",
-                    )
-                async def callback(self, interaction: discord.Interaction):
-                    class LegendView(discord.ui.LayoutView):
-                        c = discord.ui.Container(
-                            discord.ui.TextDisplay(content=legend_text),
-                            accent_colour=config.EMBED_COLOR,
-                        )
-                    await interaction.response.send_message(view=LegendView(), ephemeral=True)
-
-            btn_list.append(_HowToReadBtn())
-
-            # ── 🔍 Available Filters ───────────────────────────────────────────
-            _ft = filters_text
-
-            class _FiltersBtn(discord.ui.Button):
-                def __init__(self):
-                    super().__init__(
-                        style=discord.ButtonStyle.secondary,
-                        label="🔍 Available Filters",
-                        custom_id="g_filters",
-                    )
-                async def callback(self, interaction: discord.Interaction):
-                    class FiltersView(discord.ui.LayoutView):
-                        c = discord.ui.Container(
-                            discord.ui.TextDisplay(content=_ft),
-                            accent_colour=config.EMBED_COLOR,
-                        )
-                    await interaction.response.send_message(view=FiltersView(), ephemeral=True)
-
-            btn_list.append(_FiltersBtn())
-
-            # ── 🕐 All-time / Since 2024 toggle ───────────────────────────────
-            _is_alltime_cap  = is_alltime
-            _is_outliers_cap = is_outliers
-
-            class _AlltimeBtn(discord.ui.Button):
-                def __init__(self):
-                    if _is_alltime_cap:
-                        # currently showing all-time → button offers to go back to 2024+
-                        _style = discord.ButtonStyle.success
-                        _label = f"📅 Since {GRAPH_START_YEAR} Only"
-                    else:
-                        # currently showing 2024+ → button offers to expand to all-time
-                        _style = discord.ButtonStyle.secondary
-                        _label = "🕐 Show All-time Data"
-                    super().__init__(style=_style, label=_label, custom_id="g_alltime")
-                async def callback(self, interaction: discord.Interaction):
-                    await regenerate_fn(interaction, not _is_alltime_cap, _is_outliers_cap)
-
-            btn_list.append(_AlltimeBtn())
-
-            # ── ⚠️ Outliers toggle ─────────────────────────────────────────────
-            class _OutliersToggleBtn(discord.ui.Button):
-                def __init__(self):
-                    if _is_outliers_cap:
-                        # currently raw (outliers shown) → button offers clean view
-                        _style = discord.ButtonStyle.danger
-                        _label = "📊 Hide Outliers (Clean View)"
-                    else:
-                        # currently clean → button offers raw mode
-                        _style = discord.ButtonStyle.secondary
-                        _label = "⚠️ Include Outliers too"
-                    super().__init__(style=_style, label=_label, custom_id="g_outliers_toggle")
-                async def callback(self, interaction: discord.Interaction):
-                    await regenerate_fn(interaction, _is_alltime_cap, not _is_outliers_cap)
-
-            btn_list.append(_OutliersToggleBtn())
-
-            # ── Outlier detail viewer (only when in clean mode with hidden outliers) ─
-            if has_outliers and not is_outliers:
-                _ob = outlier_bytes
-                _oc = outlier_count
-                n_high = sum(1 for e in outlier_data if (e[3] if len(e) == 4 else "high") == "high")
-                n_low  = _oc - n_high
-                parts  = []
-                if n_high: parts.append(f"▲{n_high} overpriced")
-                if n_low:  parts.append(f"▼{n_low} sniped")
-                label  = f"📋 View {_oc} Excluded Sale(s) ({', '.join(parts)})"
-
-                class _OutlierDetailBtn(discord.ui.Button):
-                    def __init__(self):
-                        super().__init__(
-                            style=discord.ButtonStyle.secondary,
-                            label=label,
-                            custom_id="g_outlier_detail",
-                        )
-                    async def callback(self, interaction: discord.Interaction):
-                        if _ob:
-                            _ob.seek(0)
-                        out_f = discord.File(_ob, filename="outliers.png")
-                        class OutlierView(discord.ui.LayoutView):
-                            c = discord.ui.Container(
-                                discord.ui.TextDisplay(content=(
-                                    f"📋 **{_oc} sale(s) excluded from the graph**\n"
-                                    f"_▲ Overpriced outliers inflate the average; ▼ sniped/underpriced sales compress the Y-axis. Both are hidden by default for a cleaner chart._"
-                                )),
-                                discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
-                                discord.ui.MediaGallery(
-                                    discord.MediaGalleryItem(media="attachment://outliers.png"),
-                                ),
-                                accent_colour=discord.Colour(0xef476f),
-                            )
-                        await interaction.response.send_message(
-                            view=OutlierView(), file=out_f, ephemeral=True,
-                        )
-
-                btn_list.append(_OutlierDetailBtn())
-
-            return btn_list
 
         # ── Build initial button list and view ────────────────────────────────
         _btn_list = _build_btn_list(
