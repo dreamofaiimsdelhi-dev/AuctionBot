@@ -757,9 +757,8 @@ class Auction(commands.Cog):
         """Search past auctions with filters"""
         raw = filters.split() if filters else []
 
-        # ── Validate --name values before building the query ──────────────────
-        # Walk tokens, collect every value that follows a --name flag, and check
-        # it resolves to a known Pokémon.  Unknown names get an immediate error.
+        # ── Combined validation: unknown flags + invalid Pokémon names ──────────
+        # A single pass collects ALL errors so the user sees everything at once.
         #
         # Special handling for --ex / --exclude:
         #   --ex takes TWO argument tokens: <kind> <value>
@@ -776,12 +775,14 @@ class Auction(commands.Cog):
             "category", "cat", "group",
         })
 
+        _unknown_flags:  list[str] = []
+        _invalid_names:  list[str] = []
+
         i = 0
         while i < len(raw):
             tok = raw[i]
 
-            # Skip --ex <kind> <value> entirely — both argument tokens are
-            # consumed here so neither gets mistaken for a Pokémon name below.
+            # ── --ex <kind> <value>: skip flag + kind + value tokens entirely ──
             if tok.lower() in _EXCLUDE_FLAGS:
                 i += 1  # skip the flag itself
                 if i < len(raw) and raw[i].lower() in _EX_KIND_TOKENS:
@@ -791,67 +792,55 @@ class Auction(commands.Cog):
                     i += 1
                 continue
 
-            if tok.lower() in _NAME_FLAGS:
-                # Consume the value tokens (everything until the next flag)
+            if tok.startswith("-"):
+                # ── Unknown flag check ────────────────────────────────────────
+                if not is_flag(tok) and not is_category_shortcut(tok):
+                    _unknown_flags.append(tok)
+
+                # ── --name value check ────────────────────────────────────────
+                canon = resolve_flag(tok)
+                info  = FLAG_DEFINITIONS.get(canon, {}) if canon else {}
                 i += 1
-                name_parts: list[str] = []
-                while i < len(raw) and not raw[i].startswith("-"):
-                    name_parts.append(raw[i])
-                    i += 1
-                name_val = " ".join(name_parts).strip()
-                # Strip trailing "only" / leading "normal" prefix that build_query handles
-                check_val = name_val
-                if check_val.lower().endswith(" only"):
-                    check_val = check_val[:-5].strip()
-                elif check_val.lower().startswith("normal "):
-                    check_val = check_val[7:].strip()
-                if check_val:
-                    # Valid if FormsDB knows it OR the name DB resolves it
-                    forms_hit = bool(get_forms_db().resolve_name_to_forms(check_val))
-                    name_hit  = bool(resolve_pokemon_name(check_val))
-                    if not forms_hit and not name_hit:
-                        await ctx.send(
-                            view=_error_view(
-                                f"❌ **{check_val}** is not a Pokémon name.\n"
-                                f"{config.REPLY} Check the spelling or try the English name."
-                            ),
-                            reference=ctx.message,
-                            mention_author=False,
-                        )
-                        return
+
+                if canon in _NAME_FLAGS or tok.lower() in _NAME_FLAGS:
+                    # Consume value tokens (everything until the next flag)
+                    name_parts: list[str] = []
+                    while i < len(raw) and not raw[i].startswith("-"):
+                        name_parts.append(raw[i])
+                        i += 1
+                    name_val  = " ".join(name_parts).strip()
+                    check_val = name_val
+                    if check_val.lower().endswith(" only"):
+                        check_val = check_val[:-5].strip()
+                    elif check_val.lower().startswith("normal "):
+                        check_val = check_val[7:].strip()
+                    if check_val:
+                        forms_hit = bool(get_forms_db().resolve_name_to_forms(check_val))
+                        name_hit  = bool(resolve_pokemon_name(check_val))
+                        if not forms_hit and not name_hit:
+                            _invalid_names.append(check_val)
+                elif info.get("takes_arg"):
+                    # Skip value tokens for any other flag that takes an argument
+                    while i < len(raw) and not raw[i].startswith("-"):
+                        i += 1
             else:
                 i += 1
 
-        # ── Detect unknown / ambiguous flags ──────────────────────────────────
-        # Walk the tokens and report any --flag that starts with "-" but is not
-        # recognised by the filter system or as a category shortcut.
-        # This gives the user a clear error instead of silently ignoring typos.
-        _unknown_flags: list[str] = []
-        _j = 0
-        while _j < len(raw):
-            _tok = raw[_j]
-            if _tok.startswith("-"):
-                # Skip if it's a known flag or category shortcut
-                if not is_flag(_tok) and not is_category_shortcut(_tok):
-                    _unknown_flags.append(_tok)
-                # Advance past this flag AND its value token(s) if any
-                _canon = resolve_flag(_tok)
-                _info  = FLAG_DEFINITIONS.get(_canon, {}) if _canon else {}
-                _j += 1
-                if _info.get("takes_arg"):
-                    # skip value tokens (stop at next flag)
-                    while _j < len(raw) and not raw[_j].startswith("-"):
-                        _j += 1
-            else:
-                _j += 1
-
-        if _unknown_flags:
-            _uf_str = "`, `".join(_unknown_flags)
-            await ctx.send(
-                view=_error_view(
-                    f"❌ Unknown filter(s): `{_uf_str}`\n"
+        # ── Report all errors at once ─────────────────────────────────────────
+        if _unknown_flags or _invalid_names:
+            lines: list[str] = []
+            if _invalid_names:
+                for bad in _invalid_names:
+                    lines.append(f"❌ **{bad}** is not a valid Pokémon name.")
+            if _unknown_flags:
+                for uf in _unknown_flags:
+                    lines.append(f"❌ Unknown filter: `{uf}`")
+            if _invalid_names or _unknown_flags:
+                lines.append(
                     f"{config.REPLY} Check your spelling or use `a!a h` to see all available filters."
-                ),
+                )
+            await ctx.send(
+                view=_error_view("\n".join(lines)),
                 reference=ctx.message,
                 mention_author=False,
             )
