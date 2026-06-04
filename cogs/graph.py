@@ -1174,6 +1174,8 @@ class Graph(commands.Cog):
             recs.sort(key=lambda r: r.get("ts", 0))
             return recs, capped
 
+        _was_capped = False  # set to True if any _fetch call hits MAX_FETCH
+
         ref = ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None
 
         # ── Static text payloads (hoisted so all branches can reference them) ──
@@ -1469,7 +1471,8 @@ class Graph(commands.Cog):
             for mname in multi_names:
                 mraw              = ["--name", mname] + _variant_flags
                 mquery, _, mlimit = build_query(mraw, expand_name_by_dex=True)
-                mrecs, _          = _fetch(mquery, mlimit)
+                mrecs, _mc        = _fetch(mquery, mlimit)
+                if _mc: _was_capped = True
                 if mrecs:
                     _merged_records.extend(mrecs)
                     _found_names.append(mname.title())
