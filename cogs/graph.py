@@ -2655,7 +2655,7 @@ class Graph(commands.Cog):
             class _OpenCompareView(discord.ui.View):
                 def __init__(self_, col):
                     super().__init__(timeout=120)
-                    self_.add_item(_CompareModalBtn(col))
+                    self_.add_item(_CompareBtn(col))
 
             await ctx.send(
                 "📊 Click below to open the Compare modal.",
