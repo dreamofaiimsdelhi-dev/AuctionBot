@@ -123,8 +123,8 @@ OUTLIER_PAGE_SIZE   = 70      # rows per outlier table image
 
 # ─── Memory safety ────────────────────────────────────────────────────────────
 
-MEMORY_FREE_PCT_MIN = 30  # refuse new graphs below this % free RAM
-MEMORY_WARN_PCT     = 45  # log warning but proceed below this %
+MEMORY_FREE_PCT_MIN = 80  # refuse new graphs below this % free RAM
+MEMORY_WARN_PCT     = 85  # log warning but proceed below this %
 
 
 class _LowMemoryError(RuntimeError):
