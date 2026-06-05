@@ -81,7 +81,7 @@ _DISCORD_TAG = {
     "normal": "",
 }
 
-MAX_POINTS = 150_000
+MAX_POINTS = 10_000
 
 # Hard cap on records pulled from MongoDB per query.
 # Prevents OOM when no name/filter is given and the entire collection matches.
