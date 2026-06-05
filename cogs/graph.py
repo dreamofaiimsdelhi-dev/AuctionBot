@@ -85,7 +85,7 @@ MAX_POINTS = 4000
 
 # Hard cap on records pulled from MongoDB per query.
 # Prevents OOM when no name/filter is given and the entire collection matches.
-MAX_FETCH = 150_000
+MAX_FETCH = 100_000
 
 # Only include auctions from this year onwards when building graphs.
 # Change this value to shift the global cutoff.
@@ -144,12 +144,16 @@ _LEGEND_TEXT = (
     f"**📊 Stats Bar**\n"
     f"{REPLY} **Auctions** — total number of sales plotted\n"
     f"{REPLY} **Chart Min / Chart Max** — lowest and highest winning bid visible on the graph (outliers excluded)\n"
-    f"{REPLY} **All-time Min / All-time Max** — the absolute lowest and highest sale ever recorded, including any outliers\n"
+    f"{REPLY} **All-time Min / All-time Max** — the lowest and highest sale within the fetched sample (up to the fetch cap); may not reflect the true all-time record if older data wasn't fetched\n"
     f"{REPLY} **Avg** — mean price across all auctions\n"
     f"{REPLY} **Median** — middle price (less affected by extreme outliers than avg)\n"
     f"{REPLY} **Std Dev** — how spread out prices are; high = big price swings, low = consistent\n"
     f"{REPLY} **Trend** — average price change per sale (▲ rising, ▼ falling)\n"
-    f"{REPLY} **Outliers** — sales so far above the typical price range they squash everything else. Excluded from the graph and most stats"
+    f"{REPLY} **Outliers** — sales so far above the typical price range they squash everything else. Excluded from the graph and most stats\n\n"
+    f"**🔢 Subtitle Numbers**\n"
+    f"{REPLY} **sampled from DB** — how many records were pulled from MongoDB for this query\n"
+    f"{REPLY} **db has more** — the fetch cap was hit; the database has additional records beyond what was sampled\n"
+    f"{REPLY} **dots on graph** — how many of those records actually appear as dots (after subsampling for performance)"
 )
 
 _FILTERS_BODY = (
@@ -1253,7 +1257,10 @@ class Graph(commands.Cog):
                 return merged
             return ts_f
 
-        ts_filter = _build_ts_filter(use_alltime, since_dt, before_dt)
+        # Always fetch the full history from MongoDB (alltime=True) so that
+        # _regen_state.records has pre-2024 data available for the toggle.
+        # The GRAPH_START_YEAR cutoff is applied in-memory via display_records below.
+        ts_filter = _build_ts_filter(True, since_dt, before_dt)
 
         # ── Helper: fetch records for one query dict ───────────────────────────
         projection = {
@@ -1611,12 +1618,12 @@ class Graph(commands.Cog):
             disc_tag        = _DISCORD_TAG[variant]
             accent          = config.SHINY_EMBED_COLOR if variant == "shiny" else config.EMBED_COLOR
             heading         = f"## {disc_tag} {multi_name} — Price History".strip()
-            _cap_note       = " (capped)" if _capped[0] else ""
+            _cap_note       = " db has more" if _capped[0] else ""
             alltime_badge   = "  •  🕐 All-time" if use_alltime else ""
             since_badge     = f"  •  📅 Since {since_dt.strftime('%b %Y')}" if since_dt else ""
             before_badge    = f"  •  📅 Before {before_dt.strftime('%b %Y')}" if before_dt else ""
             outliers_badge  = "  •  ⚠️ Raw data (all outliers included)" if use_outliers else ""
-            sub             = f"_{_fetched_count:,} fetched{_cap_note}  •  {_plotted_count:,} plotted  •  {len(_found_names)} Pokémon{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
+            sub             = f"_{_fetched_count:,} sampled from DB{_cap_note}  •  {_plotted_count:,} dots on graph  •  {len(_found_names)} Pokémon{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
             file            = discord.File(buf, filename="graph.png")
 
             _has_outliers   = len(outliers) > 0
@@ -1765,10 +1772,30 @@ class Graph(commands.Cog):
             )
             return
 
-        if len(records) < 3:
+        # Apply the GRAPH_START_YEAR cutoff in-memory for the initial render.
+        # _regen_state.records keeps the FULL fetched history so the alltime toggle
+        # can reveal pre-2024 data without another DB round-trip.
+        _init_ts_filter = _build_ts_filter(use_alltime, since_dt, before_dt)
+        _gte_init = _init_ts_filter.get("$gte")
+        _lt_init  = _init_ts_filter.get("$lt")
+        display_records = [
+            r for r in records
+            if (_gte_init is None or r.get("ts", 0) >= _gte_init)
+            and (_lt_init  is None or r.get("ts", 0) <  _lt_init)
+        ]
+
+        if not display_records:
+            await ctx.send(
+                view=_error_view("❌ No auctions found matching your filters."),
+                reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
+                mention_author=False,
+            )
+            return
+
+        if len(display_records) < 3:
             await ctx.send(
                 view=_error_view(
-                    f"❌ Only **{len(records)}** auction(s) found — need at least 3 to draw a meaningful graph.\n"
+                    f"❌ Only **{len(display_records)}** auction(s) found — need at least 3 to draw a meaningful graph.\n"
                     f"{REPLY} Try broadening your filters."
                 ),
                 reference=ctx.message if not (hasattr(ctx, "interaction") and ctx.interaction) else None,
@@ -1780,7 +1807,7 @@ class Graph(commands.Cog):
         # For named queries (_requested_name already set) just use it.
         # For all-pokemon / broad queries, compute from unique species in results.
         if _requested_name is None:
-            unique_pn = sorted({r.get("pn", "") for r in records if r.get("pn")})
+            unique_pn = sorted({r.get("pn", "") for r in display_records if r.get("pn")})
             n_unique  = len(unique_pn)
             if n_unique == 1:
                 _requested_name = unique_pn[0]
@@ -1791,7 +1818,7 @@ class Graph(commands.Cog):
 
         try:
             buf, outliers, _fetched_count, _plotted_count = build_graph(
-                records, query, display_str,
+                display_records, query, display_str,
                 alltime=use_alltime,
                 show_outliers=use_outliers,
                 pokemon_name=_requested_name,
@@ -1813,12 +1840,12 @@ class Graph(commands.Cog):
         accent    = config.SHINY_EMBED_COLOR if variant == "shiny" else config.EMBED_COLOR
 
         heading         = f"## {disc_tag} {name} — Price History".strip()
-        _cap_note       = " (capped)" if _capped[0] else ""
+        _cap_note       = " db has more" if _capped[0] else ""
         alltime_badge   = "  •  🕐 All-time" if use_alltime else ""
         since_badge     = f"  •  📅 Since {since_dt.strftime('%b %Y')}" if since_dt else ""
         before_badge    = f"  •  📅 Before {before_dt.strftime('%b %Y')}" if before_dt else ""
         outliers_badge  = "  •  ⚠️ Raw data (all outliers included)" if use_outliers else ""
-        sub        = f"_{_fetched_count:,} fetched{_cap_note}  •  {_plotted_count:,} plotted{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
+        sub        = f"_{_fetched_count:,} sampled from DB{_cap_note}  •  {_plotted_count:,} dots on graph{alltime_badge}{since_badge}{before_badge}{outliers_badge}  •  filters: `{display_str}`_"
 
         file = discord.File(buf, filename="graph.png")
 
@@ -1901,9 +1928,9 @@ class Graph(commands.Cog):
             since_badge_n   = f"  •  📅 Since {st.since_dt.strftime('%b %Y')}" if st.since_dt else ""
             before_badge_n  = f"  •  📅 Before {st.before_dt.strftime('%b %Y')}" if st.before_dt else ""
             out_badge_n     = "  •  ⚠️ Raw data" if new_outliers else ""
-            _regen_cap_note = " (capped)" if _regen_capped else ""
+            _regen_cap_note = " db has more" if _regen_capped else ""
             new_sub         = (
-                f"_{_new_fetched:,} fetched{_regen_cap_note}  •  {_new_plotted:,} plotted"
+                f"_{_new_fetched:,} sampled from DB{_regen_cap_note}  •  {_new_plotted:,} dots on graph"
                 f"{alltime_badge_n}{since_badge_n}{before_badge_n}{out_badge_n}  •  filters: `{st.display_str}`_"
             )
 
