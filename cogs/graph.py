@@ -52,34 +52,34 @@ GRID_COLOR    = "#2a2d3a"
 TEXT_COLOR    = "#e8eaf0"
 MUTED_COLOR   = "#6c7086"
 
-# Richer, more vibrant palette — each variant has a distinct visual identity
+# Each variant has a fully distinct hue — no two share the same colour family.
 _PALETTE = {
-    # Shiny: electric yellow-lime — bright and unmistakably "sparkle"
+    # Shiny: golden yellow — the classic sparkle colour, kept as requested
     "shiny":  {
-        "dot":  "#ffe566",  # vivid lemon yellow (distinct from gold)
+        "dot":  "#ffd166",  # warm golden yellow
         "line": "#f4a261",  # amber-orange avg line
-        "fill": "#ffe56622",
+        "fill": "#ffd16622",
         "tag":  "[Shiny]",
-        "trend_up":   "#06d6a0",
-        "trend_down": "#ef476f",
+        "trend_up":   "#06d6a0",  # teal green  (▲)
+        "trend_down": "#ef476f",  # rose red    (▼)
     },
-    # Gmax: volcanic red/orange
+    # Gmax: electric violet — powerful, distinct from both yellow and red
     "gmax":   {
-        "dot":  "#ff6b6b",  # coral red
-        "line": "#ff4d6d",  # deep rose avg line
-        "fill": "#ff6b6b22",
+        "dot":  "#b04dff",  # vivid purple
+        "line": "#7b2fff",  # deep violet avg line
+        "fill": "#b04dff22",
         "tag":  "[Gmax]",
-        "trend_up":   "#06d6a0",
-        "trend_down": "#ef476f",
+        "trend_up":   "#06d6a0",  # teal green  (▲)
+        "trend_down": "#ef476f",  # rose red    (▼)
     },
-    # Normal: cool cyan/teal — distinct from Discord blurple
+    # Normal: sky cyan — cool and calm, nothing like yellow or purple
     "normal": {
         "dot":  "#4cc9f0",  # bright sky cyan
-        "line": "#7b2fff",  # vivid purple avg line
+        "line": "#118ab2",  # ocean blue avg line
         "fill": "#4cc9f022",
         "tag":  "",
-        "trend_up":   "#06d6a0",
-        "trend_down": "#ef476f",
+        "trend_up":   "#06d6a0",  # teal green  (▲)
+        "trend_down": "#ef476f",  # rose red    (▼)
     },
 }
 
@@ -187,11 +187,11 @@ _GRAPH_ONLY_FLAGS: frozenset[str] = frozenset({
 # ── Overlay palette for multi-pokemon compare mode ────────────────────────────
 # Each entry: (dot_color, line_color, fill_color)
 _OVERLAY_PALETTE = [
-    ("#4cc9f0", "#7b2fff", "#4cc9f015"),  # cyan / purple   (slot 0 — primary)
-    ("#f72585", "#b5179e", "#f7258515"),  # hot pink / magenta
-    ("#06d6a0", "#118ab2", "#06d6a015"),  # teal / ocean blue
-    ("#c8f542", "#7bc800", "#c8f54215"),  # lime green / chartreuse
-    ("#ff6b6b", "#ff4d6d", "#ff6b6b15"),  # coral / rose
+    ("#4cc9f0", "#118ab2", "#4cc9f015"),  # sky cyan   / ocean blue   (slot 0)
+    ("#ffd166", "#f4a261", "#ffd16615"),  # gold       / amber        (slot 1)
+    ("#b04dff", "#7b2fff", "#b04dff15"),  # violet     / deep purple  (slot 2)
+    ("#06d6a0", "#059c74", "#06d6a015"),  # mint teal  / dark teal    (slot 3)
+    ("#f72585", "#b5179e", "#f7258515"),  # hot pink   / magenta      (slot 4)
 ]
 
 
@@ -801,7 +801,7 @@ def build_graph(
                        label=f"High outlier(s) ({len(hi_dates)}) — hidden")
         if lo_dates:
             ax.scatter(lo_dates, [prices_plot.min()] * len(lo_dates),
-                       color="#ff9f1c", marker="v", s=44, zorder=5, linewidths=0,
+                       color="#06d6a0", marker="v", s=44, zorder=5, linewidths=0,
                        label=f"Low outlier(s) ({len(lo_dates)}) — hidden")
 
     ax.plot(dates_plot, roll_avg, color=pal["line"], linewidth=2.5,
@@ -1039,7 +1039,15 @@ def build_graph(
     return buf, list(zip(outlier_dates, outlier_prices.tolist(), outlier_records, outlier_kinds)), fetched_count, plotted_count
 
 
-OUTLIER_PAGE_SIZE = 70  # max rows per outlier table image
+OUTLIER_PAGE_SIZE = 20  # rows per outlier table page — consistent, readable size
+
+# Fixed figure dimensions for all outlier pages so every image is the same width.
+# Height is derived from OUTLIER_PAGE_SIZE so pages with fewer rows (last page)
+# still render at the same height — blank rows fill the remaining space.
+_OUTLIER_FIG_W   = 11.0   # inches — matches the main graph width
+_OUTLIER_ROW_H   = 0.38   # inches per data row
+_OUTLIER_HEAD_H  = 0.62   # inches for the title + column-header block
+_OUTLIER_FIG_H   = _OUTLIER_HEAD_H + OUTLIER_PAGE_SIZE * _OUTLIER_ROW_H  # fixed total height
 
 
 def build_outlier_image(
@@ -1048,15 +1056,24 @@ def build_outlier_image(
     variant: str,
 ) -> list[io.BytesIO]:
     """
-    Build table image(s) for outlier sales.
+    Build paginated outlier table images.
+
+    Each page holds exactly OUTLIER_PAGE_SIZE rows and every page is the same
+    fixed size (_OUTLIER_FIG_W × _OUTLIER_FIG_H inches) so the images look
+    consistent regardless of how many outliers there are.  Empty rows pad the
+    last page to reach the full height.
+
     Each entry in outliers is a (date, price, record, kind) tuple.
     kind is "high" or "low". Columns: #, Type, Auction ID, Date, Level, IV%, Winning Bid
 
-    Returns a list of BytesIO — one per page of up to OUTLIER_PAGE_SIZE rows.
-    Most Pokémon have fewer than 70 outliers so this is usually a 1-element list.
+    Returns a list of BytesIO — one per page.
     """
     headers    = ["#", "Type", "Auction ID", "Date", "Level", "IV %", "Winning Bid"]
     col_widths = [0.04, 0.08, 0.16, 0.20, 0.09, 0.12, 0.20]
+
+    # Variant tag for the title heading
+    variant_tag = {"shiny": "✨ Shiny", "gmax": "⚡ Gigantamax"}.get(variant, "")
+    display_name = f"{variant_tag} {pokemon_name}".strip() if variant_tag else pokemon_name
 
     # Pre-build all row data with global row numbers before chunking.
     all_rows = []
@@ -1070,32 +1087,66 @@ def build_outlier_image(
         kind_label = "▲ High" if kind == "high" else "▼ Low"
         all_rows.append([str(i + 1), kind_label, aid, date, level, iv_s, _format_price(p)])
 
-    # Split into pages.
+    # Split into fixed-size pages.
     chunks = [all_rows[i:i + OUTLIER_PAGE_SIZE]
               for i in range(0, len(all_rows), OUTLIER_PAGE_SIZE)]
+    total_pages = len(chunks)
 
     bufs: list[io.BytesIO] = []
-    for rows in chunks:
-        n        = len(rows)
-        row_h_in = 0.38
-        head_h   = 0.50
-        fig_h    = head_h + n * row_h_in
+    for page_idx, rows in enumerate(chunks):
+        # Pad the last page with blank rows so every image is the same height.
+        padded_rows = rows + [["", "", "", "", "", "", ""] for _ in range(OUTLIER_PAGE_SIZE - len(rows))]
 
-        fig, ax = plt.subplots(figsize=(11, fig_h), facecolor=BG_DARK)
+        fig = plt.figure(figsize=(_OUTLIER_FIG_W, _OUTLIER_FIG_H), facecolor=BG_DARK)
+
+        # Reserve top strip for the heading, rest for the table.
+        title_frac  = _OUTLIER_HEAD_H / _OUTLIER_FIG_H
+        table_frac  = 1.0 - title_frac
+
+        # ── Heading strip ─────────────────────────────────────────────────────
+        ax_title = fig.add_axes([0.0, table_frac, 1.0, title_frac])
+        ax_title.set_facecolor(BG_DARK)
+        ax_title.axis("off")
+
+        page_label = f"  •  Page {page_idx + 1}/{total_pages}" if total_pages > 1 else ""
+        ax_title.text(
+            0.5, 0.72,
+            f"⚠️ Outlier Sales — {display_name}{page_label}",
+            ha="center", va="center",
+            color=TEXT_COLOR, fontsize=12, fontweight="bold",
+            transform=ax_title.transAxes,
+        )
+        ax_title.text(
+            0.5, 0.20,
+            f"Showing {len(rows)} of {len(all_rows)} outlier(s)  •  These sales are excluded from the main graph",
+            ha="center", va="center",
+            color=MUTED_COLOR, fontsize=7.5,
+            transform=ax_title.transAxes,
+        )
+        # Separator line between title and table
+        fig.add_artist(matplotlib.lines.Line2D(
+            [0.02, 0.98], [table_frac, table_frac],
+            transform=fig.transFigure,
+            color=GRID_COLOR, linewidth=0.8,
+        ))
+
+        # ── Table axis ────────────────────────────────────────────────────────
+        ax = fig.add_axes([0.0, 0.0, 1.0, table_frac])
         ax.set_facecolor(BG_DARK)
         ax.axis("off")
 
         tbl = ax.table(
-            cellText=rows,
+            cellText=padded_rows,
             colLabels=headers,
             colWidths=col_widths,
             loc="center",
             cellLoc="center",
         )
         tbl.auto_set_font_size(False)
-        tbl.set_fontsize(8.5)
+        tbl.set_fontsize(9)
 
-        cell_h = row_h_in / fig_h
+        # All rows same height — total rows = 1 header + OUTLIER_PAGE_SIZE data rows
+        cell_h = 1.0 / (OUTLIER_PAGE_SIZE + 1)
 
         for (row, col), cell in tbl.get_celld().items():
             cell.set_edgecolor(GRID_COLOR)
@@ -1103,25 +1154,34 @@ def build_outlier_image(
             cell.set_height(cell_h)
 
             if row == 0:
-                cell.set_facecolor(BG_DARK)
+                # Column header row
+                cell.set_facecolor("#1e2130")
                 cell.get_text().set_color(TEXT_COLOR)
                 cell.get_text().set_fontweight("bold")
+                cell.get_text().set_fontsize(8)
             else:
+                is_real_row = row <= len(rows)
+                kind_val    = padded_rows[row - 1][1] if is_real_row else ""
+
                 cell.set_facecolor(BG_CARD if row % 2 == 0 else BG_DARK)
-                kind_val = rows[row - 1][1] if row <= len(rows) else ""
-                if col == 6:
-                    color = "#ef476f" if "High" in kind_val else "#ff9f1c"
+
+                if not is_real_row:
+                    cell.get_text().set_color(BG_DARK)  # invisible padding rows
+                    continue
+
+                if col == 1:
+                    # Type column — High = red, Low = orange
+                    color = "#ef476f" if "High" in kind_val else "#06d6a0"
                     cell.get_text().set_color(color)
                     cell.get_text().set_fontweight("bold")
-                elif col == 1:
-                    color = "#ef476f" if "High" in kind_val else "#ff9f1c"
+                elif col == 6:
+                    # Winning Bid — same color coding as Type
+                    color = "#ef476f" if "High" in kind_val else "#06d6a0"
                     cell.get_text().set_color(color)
                     cell.get_text().set_fontweight("bold")
                 elif col == 5:
-                    cell.get_text().set_color("#4cc9f0")  # IV % accent — sky cyan
-                elif col == 0:
-                    cell.get_text().set_color(MUTED_COLOR)
-                elif col == 2:
+                    cell.get_text().set_color("#4cc9f0")  # IV % — sky cyan
+                elif col in (0, 2):
                     cell.get_text().set_color(MUTED_COLOR)
                 else:
                     cell.get_text().set_color(TEXT_COLOR)
