@@ -54,11 +54,11 @@ MUTED_COLOR   = "#6c7086"
 
 # Richer, more vibrant palette — each variant has a distinct visual identity
 _PALETTE = {
-    # Shiny: warm gold/amber gradient feel
+    # Shiny: electric yellow-lime — bright and unmistakably "sparkle"
     "shiny":  {
-        "dot":  "#ffd166",  # warm golden yellow
+        "dot":  "#ffe566",  # vivid lemon yellow (distinct from gold)
         "line": "#f4a261",  # amber-orange avg line
-        "fill": "#ffd16622",
+        "fill": "#ffe56622",
         "tag":  "[Shiny]",
         "trend_up":   "#06d6a0",
         "trend_down": "#ef476f",
@@ -190,7 +190,7 @@ _OVERLAY_PALETTE = [
     ("#4cc9f0", "#7b2fff", "#4cc9f015"),  # cyan / purple   (slot 0 — primary)
     ("#f72585", "#b5179e", "#f7258515"),  # hot pink / magenta
     ("#06d6a0", "#118ab2", "#06d6a015"),  # teal / ocean blue
-    ("#ffd166", "#f4a261", "#ffd16615"),  # gold / amber
+    ("#c8f542", "#7bc800", "#c8f54215"),  # lime green / chartreuse
     ("#ff6b6b", "#ff4d6d", "#ff6b6b15"),  # coral / rose
 ]
 
@@ -801,7 +801,7 @@ def build_graph(
                        label=f"High outlier(s) ({len(hi_dates)}) — hidden")
         if lo_dates:
             ax.scatter(lo_dates, [prices_plot.min()] * len(lo_dates),
-                       color="#ffd166", marker="v", s=44, zorder=5, linewidths=0,
+                       color="#ff9f1c", marker="v", s=44, zorder=5, linewidths=0,
                        label=f"Low outlier(s) ({len(lo_dates)}) — hidden")
 
     ax.plot(dates_plot, roll_avg, color=pal["line"], linewidth=2.5,
@@ -1110,15 +1110,15 @@ def build_outlier_image(
                 cell.set_facecolor(BG_CARD if row % 2 == 0 else BG_DARK)
                 kind_val = rows[row - 1][1] if row <= len(rows) else ""
                 if col == 6:
-                    color = "#ef476f" if "High" in kind_val else "#ffd166"
+                    color = "#ef476f" if "High" in kind_val else "#ff9f1c"
                     cell.get_text().set_color(color)
                     cell.get_text().set_fontweight("bold")
                 elif col == 1:
-                    color = "#ef476f" if "High" in kind_val else "#ffd166"
+                    color = "#ef476f" if "High" in kind_val else "#ff9f1c"
                     cell.get_text().set_color(color)
                     cell.get_text().set_fontweight("bold")
                 elif col == 5:
-                    cell.get_text().set_color("#ffd166")  # IV % accent gold
+                    cell.get_text().set_color("#4cc9f0")  # IV % accent — sky cyan
                 elif col == 0:
                     cell.get_text().set_color(MUTED_COLOR)
                 elif col == 2:
