@@ -489,6 +489,8 @@ def create_search_view(
     # Separator + filter buttons — always shown under prev/next
     inner += [
         discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+        discord.ui.TextDisplay(content="-# 🆕 Found a bug or have an idea? Use `/bugreport` or `/suggest`"),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.ActionRow(
             AllFiltersBtn(),
             ExcludeShinyBtn(),
