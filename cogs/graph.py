@@ -93,9 +93,9 @@ MAX_POINTS = 4000
 
 # Hard cap on records pulled from MongoDB per query.
 # Prevents OOM when no name/filter is given and the entire collection matches.
-# Lowered from 100_000 — on a host with ~400 MB free RAM, large fetches cause
-# silent OOM kills before Python can raise MemoryError.
-MAX_FETCH = 20_000
+# 5 000 records is enough for meaningful graphs on any Pokémon while keeping
+# per-query RAM usage ~4 MB instead of ~16 MB at the old 20 000 cap.
+MAX_FETCH = 5_000
 
 # Only include auctions from this year onwards when building graphs.
 # Change this value to shift the global cutoff.
@@ -1151,26 +1151,56 @@ def _error_view(text: str) -> discord.ui.LayoutView:
 
 @dataclass
 class _RegenState:
-    """Bundles the immutable state needed to regenerate a graph on toggle button press.
+    """Bundles the state needed to regenerate a graph on toggle button press.
 
-    Using a dataclass instead of a raw closure makes the captured state explicit,
-    testable, and safe across concurrent requests (no shared mutable module-level vars).
+    MEMORY NOTE: We deliberately do NOT store the full record dicts here.
+    Instead we store only slim (ts, bid, iv, sh, gx, pn, aid, lv) tuples —
+    roughly 80 bytes each vs ~800 bytes for a full dict — keeping per-graph
+    overhead ~10x smaller.  The original query is kept so the toggle can
+    re-fetch from MongoDB when truly needed (currently only for the multi-name
+    regen path which already re-fetches anyway).
+
+    For the alltime / outliers toggle we apply filters in-memory over
+    slim_records — no DB round-trip needed.
     """
-    records:      list
-    query:        dict
-    display_str:  str
-    limit:        int | None
-    since_dt:     datetime | None
-    before_dt:    datetime | None
-    pokemon_name: str
-    variant:      str
-    accent:       int
-    heading:      str
-    legend_text:  str
-    filters_body: str
-    protip_text:  str
-    found_names:  list | None = None   # set for multi-name mode only
-    variant_flags: list | None = None  # set for multi-name mode only
+    slim_records:  list          # list of (ts, bid, iv, sh, gx, pn, aid, lv) tuples
+    query:         dict
+    display_str:   str
+    limit:         int | None
+    since_dt:      datetime | None
+    before_dt:     datetime | None
+    pokemon_name:  str
+    variant:       str
+    accent:        int
+    heading:       str
+    legend_text:   str
+    filters_body:  str
+    protip_text:   str
+    found_names:   list | None = None    # set for multi-name mode only
+    variant_flags: list | None = None    # set for multi-name mode only
+
+
+def _slim(records: list[dict]) -> list[tuple]:
+    """Convert full record dicts to slim (ts, bid, iv, sh, gx, pn, aid, lv) tuples."""
+    return [
+        (
+            r.get("ts", 0),
+            r.get("bid", 0),
+            r.get("iv"),
+            r.get("sh"),
+            r.get("gx"),
+            r.get("pn"),
+            r.get("aid"),
+            r.get("lv"),
+        )
+        for r in records
+    ]
+
+
+def _expand(slim_records: list[tuple]) -> list[dict]:
+    """Re-expand slim tuples back to dict form expected by build_graph."""
+    keys = ("ts", "bid", "iv", "sh", "gx", "pn", "aid", "lv")
+    return [dict(zip(keys, t)) for t in slim_records]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1573,7 +1603,7 @@ def _build_compare_modal(col, fetch_fn) -> type[discord.ui.Modal]:
 
                 class _CView(discord.ui.LayoutView):
                     container = discord.ui.Container(*comps, accent_colour=config.EMBED_COLOR)
-                    def __init__(self): super().__init__(timeout=300)
+                    def __init__(self): super().__init__(timeout=90)
 
                 if edit and target is not None:
                     await target.edit_original_response(attachments=[cfile], view=_CView())
@@ -2114,7 +2144,7 @@ class Graph(commands.Cog):
                     accent_colour=config.EMBED_COLOR,
                 )
                 def __init__(self):
-                    super().__init__(timeout=300)
+                    super().__init__(timeout=90)
 
             await ctx.send(view=CompareView(), file=file, reference=ref, mention_author=False)
             return
@@ -2264,7 +2294,7 @@ class Graph(commands.Cog):
                 ]
                 class _NewMultiView(discord.ui.LayoutView):
                     container  = discord.ui.Container(*new_container_comps, *new_btn_list, accent_colour=accent)
-                    def __init__(self): super().__init__(timeout=300)
+                    def __init__(self): super().__init__(timeout=90)
                 await interaction.edit_original_response(attachments=[new_file], view=_NewMultiView())
 
             _btn_list_multi = _build_btn_list(
@@ -2292,7 +2322,7 @@ class Graph(commands.Cog):
 
             class MultiView(discord.ui.LayoutView):
                 container  = discord.ui.Container(*_container_comps_multi, *_btn_list_multi, accent_colour=accent)
-                def __init__(self): super().__init__(timeout=300)
+                def __init__(self): super().__init__(timeout=90)
 
             await ctx.send(view=MultiView(), file=file, reference=ref, mention_author=False)
             return
@@ -2448,8 +2478,10 @@ class Graph(commands.Cog):
             out_buf = build_outlier_image(outliers, name, variant)
 
         # ── Close-over state for toggle button callbacks ───────────────────────
+        # Store slim tuples instead of full dicts — ~10x less RAM per graph message.
+        # _expand() reconstitutes the dicts on-demand when a toggle is pressed.
         _regen_state = _RegenState(
-            records      = records,
+            slim_records = _slim(records),
             query        = query,
             display_str  = display_str,
             limit        = limit,
@@ -2477,25 +2509,22 @@ class Graph(commands.Cog):
         ):
             """Rebuild and edit the message with toggled view flags.
 
-            For the alltime toggle we already have all the records in
-            _regen_state.records — we just apply a different timestamp filter in
-            memory instead of making an extra DB round-trip, which feels noticeably
-            faster.  A new DB fetch is only needed if some other state changes
-            (which currently never happens from the buttons).
+            Filters slim_records in-memory using the new timestamp bounds —
+            no DB round-trip needed. _expand() reconstitutes the dicts on-demand.
             """
             await interaction.response.defer()
             st = _regen_state
 
-            # Apply the timestamp filter in-memory — no DB round-trip needed.
+            # Apply the timestamp filter in-memory over slim tuples — no DB round-trip needed.
             new_ts_filter = _build_ts_filter(new_alltime, st.since_dt, st.before_dt)
             _gte = new_ts_filter.get("$gte")
             _lt  = new_ts_filter.get("$lt")
-            new_records = [
-                r for r in st.records
-                if (_gte is None or r.get("ts", 0) >= _gte)
-                and (_lt  is None or r.get("ts", 0) <  _lt)
+            new_slim = [
+                t for t in st.slim_records
+                if (_gte is None or t[0] >= _gte)
+                and (_lt  is None or t[0] <  _lt)
             ]
-            _regen_capped = False  # no new fetch, so no new cap
+            new_records = _expand(new_slim)
 
             if not new_records:
                 await interaction.followup.send("❌ No data found.", ephemeral=True)
@@ -2529,7 +2558,7 @@ class Graph(commands.Cog):
             since_badge_n   = f"  •  📅 Since {st.since_dt.strftime('%b %Y')}" if st.since_dt else ""
             before_badge_n  = f"  •  📅 Before {st.before_dt.strftime('%b %Y')}" if st.before_dt else ""
             out_badge_n     = "  •  ⚠️ Raw data" if new_outliers else ""
-            _regen_cap_note = " db has more" if _regen_capped else ""
+            _regen_cap_note = ""  # in-memory filter, no new DB fetch
             new_sub         = (
                 f"_{_new_fetched:,} sampled from DB{_regen_cap_note}  •  {_new_plotted:,} dots on graph"
                 f"{alltime_badge_n}{since_badge_n}{before_badge_n}{out_badge_n}  •  filters: `{st.display_str}`_"
@@ -2567,7 +2596,7 @@ class Graph(commands.Cog):
                     accent_colour=st.accent,
                 )
                 def __init__(self):
-                    super().__init__(timeout=300)
+                    super().__init__(timeout=90)
 
             await interaction.edit_original_response(
                 attachments=[new_file],
@@ -2607,7 +2636,7 @@ class Graph(commands.Cog):
                 accent_colour=accent,
             )
             def __init__(self):
-                super().__init__(timeout=300)
+                super().__init__(timeout=90)
 
         await ctx.send(
             view=GraphView(),
@@ -2617,10 +2646,10 @@ class Graph(commands.Cog):
         )
 
         # ── Free large objects from memory now that the response is sent ──────
-        # NOTE: do NOT call records.clear() here — _regen_state.records points to
-        # the same list and is needed by the toggle buttons for in-memory filtering.
-        # The list will be garbage-collected when the view times out (300 s) and
-        # _regen_state goes out of scope.
+        # records (full dicts) are no longer needed — _regen_state holds slim tuples.
+        # outliers.clear() frees the list that was captured by _OutlierDetailBtn
+        # (it already copied the bytes it needs via .getvalue()).
+        records.clear()
         outliers.clear()
         buf.close()
         if out_buf is not None:
