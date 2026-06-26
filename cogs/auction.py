@@ -112,6 +112,7 @@ _FILTER_PAGES: list[tuple[str, list[str]]] = [
             "`--name <value>`  _--n / --pokemon / --poke_ — Pokémon name. Expands to all forms with the same dex number in search.",
             "`--gender <value>`  _--sex / --g_ — Gender: `male`, `female`, `unknown`",
             "`--nature <value>`  _-nat / --nat_ — Nature (case-insensitive, e.g. `timid`)",
+            "`--item <value>`  _--helditem / --held_ — Held item (case-insensitive, e.g. `everstone`)",
             "`--shiny`  _--sh / --shinys_ — Shiny Pokémon only",
             "`--gmax`  _--gigantamax / --gm / --giga_ — Gigantamax only",
             "`--evo <value>`  _--evolution / --family / --fam_ — All Pokémon in the same evo family",
