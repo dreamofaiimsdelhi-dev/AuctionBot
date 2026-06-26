@@ -1032,6 +1032,11 @@ def build_query(
             query["nat"] = {"$regex": f"^{re.escape(val)}$", "$options": "i"}
             continue
 
+        # ── Held item ─────────────────────────────────────────────────────────
+        if canonical == "--item":
+            query["hi"] = {"$regex": f"^{re.escape(val)}$", "$options": "i"}
+            continue
+
         # ── Move (stackable) ──────────────────────────────────────────────────
         if canonical == "--move":
             and_clauses.append({
