@@ -18,8 +18,8 @@ mongo_field uses the SHORT schema field names:
   spe  = iv_speed            bid  = winning_bid
   sh   = shiny               gx   = gmax
   nat  = nature              mv   = moves
-  sn   = seller_name         sid  = seller_id
-  bdr  = bidder_id
+  hi   = held_item           sn   = seller_name
+  sid  = seller_id           bdr  = bidder_id
 """
 
 from __future__ import annotations
@@ -187,6 +187,15 @@ FLAG_DEFINITIONS: dict[str, dict] = {
         "multi":       False,
         "help":        "Nature (exact, case-insensitive)",
         "mongo_field": "nat",
+    },
+
+    # ── Held item ─────────────────────────────────────────────────────────────
+    "--item": {
+        "aliases":     ["--helditem", "--held_item", "--held", "--hi"],
+        "takes_arg":   True,
+        "multi":       False,
+        "help":        "Held item (exact, case-insensitive, e.g. --item everstone)",
+        "mongo_field": "hi",
     },
 
     # ── Move ──────────────────────────────────────────────────────────────────
