@@ -451,22 +451,13 @@ def get_pokemon_image_url(pokemon_name: str, shiny: bool = False) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Pokopia Ditto doesn't use a static CDN sprite — its look is generated from
 # a customize URL (body/hair/outfit/shoes). The auction scraper packs those
-# four values into a single "cz" int field on the record (base-1000 encoded,
-# non-shiny rolls only — see auction scraper). This section unpacks "cz" and
-# builds the right thumbnail link for it.
+# four values into a single "cz" int field on the record (base-1000 encoded),
+# for both shiny and non-shiny rolls. This section unpacks "cz" and builds
+# the right thumbnail link for it.
 
 POKOPIA_DITTO_NAME       = "Pokopia Ditto"
 POKOPIA_DITTO_SPECIES_ID = 50264
 POKOPIA_CUSTOMIZE_URL    = "https://server.poketwo.io/customize"
-
-# The regular shiny CDN sprite doesn't exist for this species, and shiny
-# rolls don't have their own body/hair/outfit/shoes captured (the scraper
-# intentionally skips saving "cz" for shiny Pokopia Ditto), so every shiny
-# Pokopia Ditto renders through this one fixed shiny customize link.
-POKOPIA_DITTO_SHINY_URL = (
-    f"{POKOPIA_CUSTOMIZE_URL}?body=0&hair=0&outfit=0&shoes=0"
-    f"&species={POKOPIA_DITTO_SPECIES_ID}&shiny=3"
-)
 
 
 def unpack_customization(cz: int) -> dict:
@@ -481,28 +472,26 @@ def unpack_customization(cz: int) -> dict:
 
 def get_pokopia_ditto_image_url(record: dict) -> str:
     """
-    Builds the right thumbnail link for a Pokopia Ditto auction record.
+    Builds the thumbnail link for a Pokopia Ditto auction record.
 
-      • Shiny     → fixed shiny customize link (no per-roll customization
-                    is stored for shiny rolls).
-      • Non-shiny → customize URL built from the record's "cz" field.
-      • Non-shiny with no "cz" (e.g. an older record saved before this
-        feature existed) → falls back to the default all-zero look so a
-        thumbnail still renders instead of nothing.
+    Both shiny and non-shiny rolls store their own body/hair/outfit/shoes
+    in the record's "cz" field. Shiny just appends "&shiny=1" to the same
+    customize URL. Falls back to the default all-zero look if "cz" is
+    missing (e.g. an older record saved before this feature existed).
     """
-    if record.get("sh"):
-        return POKOPIA_DITTO_SHINY_URL
-
     cz = record.get("cz")
     c  = (
         unpack_customization(cz) if cz is not None
         else {"body": 0, "hair": 0, "outfit": 0, "shoes": 0}
     )
 
-    return (
+    url = (
         f"{POKOPIA_CUSTOMIZE_URL}?body={c['body']}&hair={c['hair']}"
         f"&outfit={c['outfit']}&shoes={c['shoes']}&species={POKOPIA_DITTO_SPECIES_ID}"
     )
+    if record.get("sh"):
+        url += "&shiny=1"
+    return url
 
 
 # ─────────────────────────────────────────────────────────────────────────────
