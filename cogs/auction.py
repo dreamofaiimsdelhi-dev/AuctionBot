@@ -39,6 +39,7 @@ from utils import (
     format_winning_bid, format_winning_bid_long,
     shiny_prefix, get_pokemon_image_url,
     resolve_pokemon_name, get_forms_db,
+    get_pokopia_ditto_image_url, POKOPIA_DITTO_NAME,
 )
 
 # ─── Name flag aliases (derived from filters.py — stays in sync automatically) ─
@@ -531,7 +532,11 @@ def create_info_view(record: dict) -> discord.ui.LayoutView:
     msg_url    = _build_message_url(record)
     level_s    = str(level) if level is not None else "???"
     shiny_s    = shiny_prefix(record)
-    img_url    = get_pokemon_image_url(name, shiny)
+    img_url    = (
+        get_pokopia_ditto_image_url(record)
+        if name.lower() == POKOPIA_DITTO_NAME.lower()
+        else get_pokemon_image_url(name, shiny)
+    )
     accent     = config.SHINY_EMBED_COLOR if shiny else config.EMBED_COLOR
     bidder_s   = (f"<@{bidder_id}> (`{bidder_id}`)" if bidder_id else "Unknown")
     seller_s   = (f"`{seller}`" if not seller_id else f"<@{seller_id}> (`{seller_id}`) (`{seller}`)")
