@@ -47,7 +47,7 @@ FLAG_DEFINITIONS: dict[str, dict] = {
 
     # ── Level ─────────────────────────────────────────────────────────────────
     "--level": {
-        "aliases":     ["--l", "--lv", "--lvl"],
+        "aliases":     ["--l", "--lev", "--lvl"],
         "takes_arg":   True,
         "multi":       False,
         "help":        "Level (e.g. 50, >50, >=50, <100, 30-100)",
